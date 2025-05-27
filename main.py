@@ -1,12 +1,18 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 import requests
 import logging
 import os
+import time
+import asyncio
+import re
+import motor.motor_asyncio
 from dotenv import load_dotenv
 from pymongo import MongoClient
-from datetime import datetime
-import time
-from urllib.parse import quote
+from datetime import datetime, timedelta
+from urllib.parse import quote, urlencode
+from typing import Optional, Dict, List, Any
+from pydantic import BaseModel, Field
+from bson import ObjectId
 
 # Load environment variables
 load_dotenv()
@@ -41,852 +47,846 @@ def health_check():
     """Health check endpoint"""
     return jsonify({"status": "healthy", "message": "YGO API is running"})
 
-@app.route('/card-sets', methods=['GET'])
-def get_all_card_sets():
-    """
-    Get all Yu-Gi-Oh! card sets from the YGO API
-    Returns: JSON response with all card sets including set name, code, number of cards, and TCG date
-    """
-    try:
-        # Make request to YGO API cardsets endpoint
-        response = requests.get(f"{YGO_API_BASE_URL}/cardsets.php", timeout=10)
-        
-        # Check if request was successful
-        if response.status_code == 200:
-            card_sets_data = response.json()
-            
-            # Log successful request
-            logger.info(f"Successfully retrieved {len(card_sets_data)} card sets")
-            
-            return jsonify({
-                "success": True,
-                "data": card_sets_data,
-                "count": len(card_sets_data),
-                "message": "Card sets retrieved successfully"
-            })
-        
-        else:
-            logger.error(f"YGO API returned status code: {response.status_code}")
-            return jsonify({
-                "success": False,
-                "error": "Failed to fetch data from YGO API",
-                "status_code": response.status_code
-            }), 500
-            
-    except requests.exceptions.Timeout:
-        logger.error("Request to YGO API timed out")
-        return jsonify({
-            "success": False,
-            "error": "Request timed out"
-        }), 504
-        
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Request error: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": "Failed to connect to YGO API"
-        }), 503
-        
-    except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": "Internal server error"
-        }), 500
+# Price scraping models
+class PyObjectId(ObjectId):
+    """Custom ObjectId class for Pydantic compatibility."""
+    
+    @classmethod
+    def __get_validators__(cls):
+        yield cls.validate
 
-@app.route('/card-sets/search/<string:set_name>', methods=['GET'])
-def search_card_sets(set_name):
-    """
-    Search for card sets by name (case-insensitive partial match)
-    Args:
-        set_name: Name or partial name of the card set to search for
-    Returns: JSON response with matching card sets
-    """
-    try:
-        # Get all card sets first
-        response = requests.get(f"{YGO_API_BASE_URL}/cardsets.php", timeout=10)
-        
-        if response.status_code == 200:
-            all_sets = response.json()
-            
-            # Filter sets by name (case-insensitive)
-            matching_sets = [
-                card_set for card_set in all_sets 
-                if set_name.lower() in card_set.get('set_name', '').lower()
-            ]
-            
-            logger.info(f"Found {len(matching_sets)} card sets matching '{set_name}'")
-            
-            return jsonify({
-                "success": True,
-                "data": matching_sets,
-                "count": len(matching_sets),
-                "search_term": set_name,
-                "message": f"Found {len(matching_sets)} matching card sets"
-            })
-        
-        else:
-            return jsonify({
-                "success": False,
-                "error": "Failed to fetch data from YGO API",
-                "status_code": response.status_code
-            }), 500
-            
-    except Exception as e:
-        logger.error(f"Error searching card sets: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": "Failed to search card sets"
-        }), 500
+    @classmethod
+    def validate(cls, v):
+        if not ObjectId.is_valid(v):
+            raise ValueError("Invalid ObjectId")
+        return ObjectId(v)
 
-@app.route('/card-sets/upload', methods=['POST'])
-def upload_card_sets_to_mongodb():
-    """
-    Upload all card sets from YGO API to MongoDB collection YGO_SETS_CACHE_V1
-    Returns: JSON response with upload status and statistics
-    """
-    try:
-        # Check MongoDB connection
-        if not MONGODB_CONNECTION_STRING:
-            return jsonify({
-                "success": False,
-                "error": "MongoDB connection string not configured"
-            }), 500
-        
-        # Get MongoDB client
-        client = get_mongo_client()
-        if not client:
-            return jsonify({
-                "success": False,
-                "error": "Failed to connect to MongoDB"
-            }), 500
-        
-        # Make request to YGO API cardsets endpoint
-        logger.info("Fetching card sets from YGO API...")
-        response = requests.get(f"{YGO_API_BASE_URL}/cardsets.php", timeout=10)
-        
-        if response.status_code != 200:
-            return jsonify({
-                "success": False,
-                "error": "Failed to fetch data from YGO API",
-                "status_code": response.status_code
-            }), 500
-        
-        card_sets_data = response.json()
-        logger.info(f"Retrieved {len(card_sets_data)} card sets from API")
-        
-        # Get database and collection
-        db = client.get_default_database()
-        collection = db[MONGODB_COLLECTION_NAME]
-        
-        # Add metadata to each document
-        upload_timestamp = datetime.utcnow()
-        for card_set in card_sets_data:
-            card_set['_uploaded_at'] = upload_timestamp
-            card_set['_source'] = 'ygoprodeck_api'
-        
-        # Clear existing data in collection
-        delete_result = collection.delete_many({})
-        logger.info(f"Cleared {delete_result.deleted_count} existing documents")
-        
-        # Insert new data
-        insert_result = collection.insert_many(card_sets_data)
-        inserted_count = len(insert_result.inserted_ids)
-        
-        # Create index on set_code for better query performance
-        collection.create_index("set_code")
-        collection.create_index("set_name")
-        
-        logger.info(f"Successfully uploaded {inserted_count} card sets to MongoDB")
-        
-        # Close MongoDB connection
-        client.close()
-        
-        return jsonify({
-            "success": True,
-            "message": "Card sets uploaded successfully to MongoDB",
-            "statistics": {
-                "total_sets_uploaded": inserted_count,
-                "previous_documents_cleared": delete_result.deleted_count,
-                "collection_name": MONGODB_COLLECTION_NAME,
-                "upload_timestamp": upload_timestamp.isoformat()
-            }
-        })
-        
-    except requests.exceptions.Timeout:
-        logger.error("Request to YGO API timed out")
-        return jsonify({
-            "success": False,
-            "error": "Request timed out"
-        }), 504
-        
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Request error: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": "Failed to connect to YGO API"
-        }), 503
-        
-    except Exception as e:
-        logger.error(f"Unexpected error during upload: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": "Internal server error during upload"
-        }), 500
+    @classmethod
+    def __get_pydantic_json_schema__(cls, field_schema):
+        field_schema.update(type="string")
+        return field_schema
 
-@app.route('/card-sets/from-cache', methods=['GET'])
-def get_card_sets_from_cache():
-    """
-    Get all card sets from MongoDB cache
-    Returns: JSON response with cached card sets
-    """
-    try:
-        # Check MongoDB connection
-        if not MONGODB_CONNECTION_STRING:
-            return jsonify({
-                "success": False,
-                "error": "MongoDB connection string not configured"
-            }), 500
-        
-        # Get MongoDB client
-        client = get_mongo_client()
-        if not client:
-            return jsonify({
-                "success": False,
-                "error": "Failed to connect to MongoDB"
-            }), 500
-        
-        # Get database and collection
-        db = client.get_default_database()
-        collection = db[MONGODB_COLLECTION_NAME]
-        
-        # Get all documents (excluding MongoDB internal fields)
-        cursor = collection.find({}, {"_id": 0})
-        card_sets = list(cursor)
-        
-        # Get cache metadata if available
-        cache_info = None
-        if card_sets:
-            cache_info = {
-                "last_updated": card_sets[0].get('_uploaded_at'),
-                "source": card_sets[0].get('_source')
-            }
-        
-        # Close MongoDB connection
-        client.close()
-        
-        logger.info(f"Retrieved {len(card_sets)} card sets from MongoDB cache")
-        
-        return jsonify({
-            "success": True,
-            "data": card_sets,
-            "count": len(card_sets),
-            "cache_info": cache_info,
-            "message": f"Retrieved {len(card_sets)} card sets from cache"
-        })
-        
-    except Exception as e:
-        logger.error(f"Error retrieving card sets from cache: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": "Failed to retrieve card sets from cache"
-        }), 500
+class CardPriceModel(BaseModel):
+    """Model for card pricing data stored in MongoDB."""
+    
+    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
+    
+    # Core card identification fields
+    card_number: str = Field(..., description="Card number (e.g., BLTR-EN051)")
+    card_name: str = Field(..., description="Card name, may include art information")
+    card_art_variant: Optional[str] = Field(None, description="Art version (e.g., '7', '1st', etc.)")
+    booster_set_name: Optional[str] = Field(None, description="Booster set name where card is from")
+    set_code: Optional[str] = Field(None, description="4-character set code (e.g., BLTR, SUDA, RA04)")
+    card_rarity: Optional[str] = Field(None, description="Card rarity (e.g., Secret Rare, Ultra Rare)")
+    
+    # Pricing data fields
+    tcg_price: Optional[float] = Field(None, description="TCGPlayer price")
+    pc_ungraded_price: Optional[float] = Field(None, description="PriceCharting ungraded price")
+    pc_grade7: Optional[float] = Field(None, description="PriceCharting Grade 7 price")
+    pc_grade8: Optional[float] = Field(None, description="PriceCharting Grade 8 price")
+    pc_grade9: Optional[float] = Field(None, description="PriceCharting Grade 9 price")
+    pc_grade9_5: Optional[float] = Field(None, description="PriceCharting Grade 9.5 price")
+    pc_grade10: Optional[float] = Field(None, description="PriceCharting Grade 10/PSA 10 price")
+    
+    # Metadata fields
+    last_price_updt: datetime = Field(default_factory=datetime.utcnow, description="Last price update time")
+    source_url: Optional[str] = Field(None, description="URL where prices were scraped from")
+    scrape_success: bool = Field(True, description="Whether the last scrape was successful")
+    error_message: Optional[str] = Field(None, description="Error message if scrape failed")
+    
+    class Config:
+        populate_by_name = True
+        arbitrary_types_allowed = True
+        json_encoders = {ObjectId: str}
 
-@app.route('/card-sets/count', methods=['GET'])
-def get_card_sets_count():
-    """
-    Get the total count of card sets
-    Returns: JSON response with total count
-    """
-    try:
-        response = requests.get(f"{YGO_API_BASE_URL}/cardsets.php", timeout=10)
-        
-        if response.status_code == 200:
-            card_sets_data = response.json()
-            total_count = len(card_sets_data)
-            
-            return jsonify({
-                "success": True,
-                "total_sets": total_count,
-                "message": f"Total card sets available: {total_count}"
-            })
-        
-        else:
-            return jsonify({
-                "success": False,
-                "error": "Failed to fetch data from YGO API"
-            }), 500
-            
-    except Exception as e:
-        logger.error(f"Error getting card sets count: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": "Failed to get card sets count"
-        }), 500
+# Global variables for price scraping service
+price_scraping_client = None
+price_scraping_collection = None
 
-@app.route('/card-sets/fetch-all-cards', methods=['POST'])
-def fetch_all_cards_from_sets():
-    """
-    Iterate through all cached card sets and fetch all cards for each set
-    Returns: JSON response with comprehensive card data from all sets
-    """
+# Price scraping configuration
+PRICE_CACHE_COLLECTION = "YGO_CARD_VARIANT_PRICE_CACHE_V1"
+CACHE_EXPIRY_DAYS = 7
+
+async def initialize_price_scraping():
+    """Initialize async MongoDB client for price scraping."""
+    global price_scraping_client, price_scraping_collection
     try:
-        # Check MongoDB connection
-        if not MONGODB_CONNECTION_STRING:
-            return jsonify({
-                "success": False,
-                "error": "MongoDB connection string not configured"
-            }), 500
-        
-        # Get MongoDB client
-        client = get_mongo_client()
-        if not client:
-            return jsonify({
-                "success": False,
-                "error": "Failed to connect to MongoDB"
-            }), 500
-        
-        # Get database and collection for sets
-        db = client.get_default_database()
-        sets_collection = db[MONGODB_COLLECTION_NAME]
-        
-        # Get all cached sets
-        cached_sets = list(sets_collection.find({}, {"_id": 0}))
-        if not cached_sets:
-            return jsonify({
-                "success": False,
-                "error": "No cached card sets found. Please upload sets first using /card-sets/upload"
-            }), 404
-        
-        logger.info(f"Found {len(cached_sets)} cached sets to process")
-        
-        # Initialize response data
-        all_cards_data = {}
-        processing_stats = {
-            "total_sets": len(cached_sets),
-            "processed_sets": 0,
-            "failed_sets": 0,
-            "total_cards_found": 0,
-            "processing_errors": []
-        }
-        
-        # Rate limiting: 20 requests per second max
-        request_delay = 0.1  # 100ms delay between requests to stay under limit
-        
-        # Process each set
-        for index, card_set in enumerate(cached_sets):
-            set_name = card_set.get('set_name', '')
-            set_code = card_set.get('set_code', '')
+        if price_scraping_client is None:
+            price_scraping_client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_CONNECTION_STRING)
+            db = price_scraping_client.get_default_database()
+            price_scraping_collection = db[PRICE_CACHE_COLLECTION]
             
-            try:
-                logger.info(f"Processing set {index + 1}/{len(cached_sets)}: {set_name}")
-                
-                # URL encode the set name for the API call
-                encoded_set_name = quote(set_name)
-                
-                # Make request to YGO API for cards in this set
-                api_url = f"{YGO_API_BASE_URL}/cardinfo.php?cardset={encoded_set_name}"
-                response = requests.get(api_url, timeout=15)
-                
-                if response.status_code == 200:
-                    cards_data = response.json()
-                    cards_list = cards_data.get('data', [])
-                    
-                    # Store cards data for this set
-                    all_cards_data[set_name] = {
-                        "set_info": card_set,
-                        "cards": cards_list,
-                        "card_count": len(cards_list)
-                    }
-                    
-                    processing_stats["total_cards_found"] += len(cards_list)
-                    processing_stats["processed_sets"] += 1
-                    
-                    logger.info(f"Successfully fetched {len(cards_list)} cards from {set_name}")
-                    
-                elif response.status_code == 400:
-                    # Set might not have cards or name might be invalid
-                    logger.warning(f"No cards found for set: {set_name} (400 response)")
-                    all_cards_data[set_name] = {
-                        "set_info": card_set,
-                        "cards": [],
-                        "card_count": 0,
-                        "note": "No cards found for this set"
-                    }
-                    processing_stats["processed_sets"] += 1
-                    
-                else:
-                    error_msg = f"API error for set {set_name}: HTTP {response.status_code}"
-                    logger.error(error_msg)
-                    processing_stats["failed_sets"] += 1
-                    processing_stats["processing_errors"].append({
-                        "set_name": set_name,
-                        "error": error_msg
-                    })
-                
-                # Rate limiting delay
-                time.sleep(request_delay)
-                
-            except requests.exceptions.Timeout:
-                error_msg = f"Timeout fetching cards for set: {set_name}"
-                logger.error(error_msg)
-                processing_stats["failed_sets"] += 1
-                processing_stats["processing_errors"].append({
-                    "set_name": set_name,
-                    "error": error_msg
-                })
-                
-            except Exception as e:
-                error_msg = f"Error processing set {set_name}: {str(e)}"
-                logger.error(error_msg)
-                processing_stats["failed_sets"] += 1
-                processing_stats["processing_errors"].append({
-                    "set_name": set_name,
-                    "error": error_msg
-                })
+            # Create indexes for efficient querying
+            await price_scraping_collection.create_index([
+                ("card_number", 1),
+                ("card_name", 1),
+                ("card_rarity", 1),
+                ("card_art_variant", 1)
+            ], name="card_identification_idx")
+            
+            await price_scraping_collection.create_index("card_number", name="card_number_idx")
+            await price_scraping_collection.create_index("last_price_updt", name="timestamp_idx")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to initialize price scraping: {e}")
+        return False
+
+def extract_art_version(card_name: str) -> Optional[str]:
+    """Extract art version from card name using regex patterns."""
+    if not card_name:
+        return None
+    
+    patterns = [
+        r'\b(\d+)(st|nd|rd|th)?\s*(art|artwork)\b',  # "7th art", "1st artwork"
+        r'\[(\d+)(st|nd|rd|th)?\]',                   # "[7th]", "[1]"
+        r'\((\d+)(st|nd|rd|th)?\)',                   # "(7th)", "(1)"
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, card_name, re.IGNORECASE)
+        if match:
+            art_version = match.group(1)
+            logger.info(f"Detected art version: {art_version} in card name: {card_name}")
+            return art_version
+    
+    return None
+
+def normalize_rarity(rarity: str) -> str:
+    """Normalize rarity string for consistent comparison."""
+    if not rarity:
+        return ''
+    
+    normalized = rarity.lower().strip()
+    normalized = re.sub(r'\s+', ' ', normalized)  # Replace multiple spaces
+    normalized = re.sub(r'[-_]', ' ', normalized)  # Replace hyphens/underscores
+    
+    # Special handling for Quarter Century variants
+    if 'quarter century' in normalized or '25th anniversary' in normalized:
+        if 'secret' in normalized:
+            return 'quarter century secret rare'
+        elif 'ultra' in normalized:
+            return 'quarter century ultra rare'
+        elif 'rare' in normalized:
+            return 'quarter century rare'
+        return 'quarter century'
+    
+    return normalized
+
+async def find_cached_price_data(
+    card_number: str, 
+    card_name: Optional[str] = None,
+    card_rarity: Optional[str] = None,
+    art_variant: Optional[str] = None
+) -> tuple[bool, Optional[Dict]]:
+    """Check if we have fresh price data in cache."""
+    if price_scraping_collection is None:
+        return False, None
+    
+    try:
+        # Build query
+        query = {"card_number": card_number}
         
-        # Close MongoDB connection
-        client.close()
+        if card_name:
+            query["card_name"] = {"$regex": card_name, "$options": "i"}
+        if card_rarity:
+            query["card_rarity"] = {"$regex": card_rarity, "$options": "i"}
+        if art_variant:
+            query["card_art_variant"] = art_variant
         
-        # Calculate final statistics
-        processing_stats["success_rate"] = (
-            processing_stats["processed_sets"] / processing_stats["total_sets"] * 100
-            if processing_stats["total_sets"] > 0 else 0
+        # Find most recent entry
+        document = await price_scraping_collection.find_one(
+            query,
+            sort=[("last_price_updt", -1)]
         )
         
-        logger.info(f"Completed processing all sets. Found {processing_stats['total_cards_found']} total cards")
+        if not document:
+            return False, None
         
-        return jsonify({
-            "success": True,
-            "message": "Successfully fetched cards from all sets",
-            "data": all_cards_data,
-            "statistics": processing_stats
-        })
+        # Check if data is fresh (within expiry period)
+        expiry_date = datetime.utcnow() - timedelta(days=CACHE_EXPIRY_DAYS)
+        is_fresh = document.get('last_price_updt', datetime.min) > expiry_date
         
-    except Exception as e:
-        logger.error(f"Unexpected error during card fetching: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": "Internal server error during card fetching"
-        }), 500
-
-@app.route('/card-sets/<string:set_name>/cards', methods=['GET'])
-def get_cards_from_specific_set(set_name):
-    """
-    Get all cards from a specific card set
-    Args:
-        set_name: Name of the card set to fetch cards from
-    Returns: JSON response with all cards from the specified set
-    """
-    try:
-        # URL encode the set name for the API call
-        encoded_set_name = quote(set_name)
-        
-        # Make request to YGO API for cards in this set
-        logger.info(f"Fetching cards from set: {set_name}")
-        api_url = f"{YGO_API_BASE_URL}/cardinfo.php?cardset={encoded_set_name}"
-        response = requests.get(api_url, timeout=15)
-        
-        if response.status_code == 200:
-            cards_data = response.json()
-            cards_list = cards_data.get('data', [])
-            
-            logger.info(f"Successfully fetched {len(cards_list)} cards from {set_name}")
-            
-            return jsonify({
-                "success": True,
-                "set_name": set_name,
-                "data": cards_list,
-                "card_count": len(cards_list),
-                "message": f"Successfully fetched {len(cards_list)} cards from {set_name}"
-            })
-            
-        elif response.status_code == 400:
-            return jsonify({
-                "success": False,
-                "set_name": set_name,
-                "error": "No cards found for this set or invalid set name",
-                "card_count": 0
-            }), 404
-            
-        else:
-            return jsonify({
-                "success": False,
-                "set_name": set_name,
-                "error": f"API error: HTTP {response.status_code}"
-            }), 500
-            
-    except requests.exceptions.Timeout:
-        logger.error(f"Timeout fetching cards for set: {set_name}")
-        return jsonify({
-            "success": False,
-            "set_name": set_name,
-            "error": "Request timed out"
-        }), 504
+        return is_fresh, document
         
     except Exception as e:
-        logger.error(f"Error fetching cards for set {set_name}: {str(e)}")
-        return jsonify({
-            "success": False,
-            "set_name": set_name,
-            "error": "Internal server error"
-        }), 500
+        logger.error(f"Error checking cached price data: {e}")
+        return False, None
 
-@app.route('/cards/upload-variants', methods=['POST'])
-def upload_card_variants_to_mongodb():
-    """
-    Fetch all cards from cached sets and upload them as unique variants to MongoDB
-    Each variant is unique by: card_id, set_code, set_rarity, and card_image_id
-    Returns: JSON response with upload status and statistics
-    """
+async def save_price_data(price_data: Dict) -> bool:
+    """Save price data to MongoDB."""
+    if price_scraping_collection is None:
+        return False
+    
     try:
-        # Check MongoDB connection
-        if not MONGODB_CONNECTION_STRING:
-            return jsonify({
-                "success": False,
-                "error": "MongoDB connection string not configured"
-            }), 500
+        # Update timestamp
+        price_data['last_price_updt'] = datetime.utcnow()
         
-        # Get MongoDB client
-        client = get_mongo_client()
-        if not client:
-            return jsonify({
-                "success": False,
-                "error": "Failed to connect to MongoDB"
-            }), 500
-        
-        # Get database and collections
-        db = client.get_default_database()
-        sets_collection = db[MONGODB_COLLECTION_NAME]
-        variants_collection = db[MONGODB_CARD_VARIANTS_COLLECTION]
-        
-        # Get all cached sets
-        cached_sets = list(sets_collection.find({}, {"_id": 0}))
-        if not cached_sets:
-            return jsonify({
-                "success": False,
-                "error": "No cached card sets found. Please upload sets first using /card-sets/upload"
-            }), 404
-        
-        logger.info(f"Found {len(cached_sets)} cached sets to process for card variants")
-        
-        # Initialize processing data
-        all_variants = []
-        variant_ids_seen = set()  # Track unique variant IDs to prevent duplicates
-        processing_stats = {
-            "total_sets": len(cached_sets),
-            "processed_sets": 0,
-            "failed_sets": 0,
-            "total_cards_processed": 0,
-            "unique_variants_created": 0,
-            "duplicate_variants_skipped": 0,
-            "processing_errors": []
+        # Use upsert to replace existing record
+        query = {
+            "card_number": price_data["card_number"],
+            "card_name": price_data["card_name"],
+            "card_rarity": price_data.get("card_rarity"),
+            "card_art_variant": price_data.get("card_art_variant")
         }
         
-        # Rate limiting: 20 requests per second max
-        request_delay = 0.1  # 100ms delay between requests
-        upload_timestamp = datetime.utcnow()
+        # Remove None values from query
+        query = {k: v for k, v in query.items() if v is not None}
         
-        # Process each set
-        for index, card_set in enumerate(cached_sets):
-            set_name = card_set.get('set_name', '')
-            set_code = card_set.get('set_code', '')
-            
-            try:
-                logger.info(f"Processing set {index + 1}/{len(cached_sets)}: {set_name}")
-                
-                # URL encode the set name for the API call
-                encoded_set_name = quote(set_name)
-                
-                # Make request to YGO API for cards in this set
-                api_url = f"{YGO_API_BASE_URL}/cardinfo.php?cardset={encoded_set_name}"
-                response = requests.get(api_url, timeout=15)
-                
-                if response.status_code == 200:
-                    cards_data = response.json()
-                    cards_list = cards_data.get('data', [])
-                    
-                    # Process each card to create variants
-                    for card in cards_list:
-                        card_id = card.get('id')
-                        card_name = card.get('name', '')
-                        card_sets = card.get('card_sets', [])
-                        card_images = card.get('card_images', [])
-                        
-                        processing_stats["total_cards_processed"] += 1
-                        
-                        # Create variants for each set appearance
-                        for card_set_info in card_sets:
-                            # Skip if this card set info doesn't match our current set
-                            if card_set_info.get('set_name') != set_name:
-                                continue
-                                
-                            # Create variants for each artwork/image
-                            for image_info in card_images:
-                                image_id = image_info.get('id')
-                                
-                                # Create unique variant identifier
-                                variant_id = f"{card_id}_{card_set_info.get('set_code', '')}_{card_set_info.get('set_rarity', '')}_{image_id}"
-                                
-                                # Skip this variant if it has already been seen
-                                if variant_id in variant_ids_seen:
-                                    processing_stats["duplicate_variants_skipped"] += 1
-                                    continue
-                                
-                                # Create variant document
-                                variant_doc = {
-                                    "_variant_id": variant_id,
-                                    "_uploaded_at": upload_timestamp,
-                                    "_source": "ygoprodeck_api",
-                                    
-                                    # Card basic info
-                                    "card_id": card_id,
-                                    "card_name": card_name,
-                                    "card_type": card.get('type'),
-                                    "card_frameType": card.get('frameType'),
-                                    "card_desc": card.get('desc'),
-                                    "ygoprodeck_url": card.get('ygoprodeck_url'),
-                                    
-                                    # Monster specific stats
-                                    "atk": card.get('atk'),
-                                    "def": card.get('def'),
-                                    "level": card.get('level'),
-                                    "race": card.get('race'),
-                                    "attribute": card.get('attribute'),
-                                    "scale": card.get('scale'),
-                                    "linkval": card.get('linkval'),
-                                    "linkmarkers": card.get('linkmarkers'),
-                                    "archetype": card.get('archetype'),
-                                    
-                                    # Set specific info
-                                    "set_name": card_set_info.get('set_name'),
-                                    "set_code": card_set_info.get('set_code'),
-                                    "set_rarity": card_set_info.get('set_rarity'),
-                                    "set_rarity_code": card_set_info.get('set_rarity_code'),
-                                    "set_price": card_set_info.get('set_price'),
-                                    
-                                    # Image/artwork specific info
-                                    "image_id": image_id,
-                                    "image_url": image_info.get('image_url'),
-                                    "image_url_small": image_info.get('image_url_small'),
-                                    "image_url_cropped": image_info.get('image_url_cropped'),
-                                    
-                                    # Additional data
-                                    "card_prices": card.get('card_prices', []),
-                                    "banlist_info": card.get('banlist_info', {}),
-                                    
-                                    # Set metadata
-                                    "set_tcg_date": card_set.get('tcg_date'),
-                                    "set_num_of_cards": card_set.get('num_of_cards')
-                                }
-                                
-                                all_variants.append(variant_doc)
-                                variant_ids_seen.add(variant_id)
-                    
-                    processing_stats["processed_sets"] += 1
-                    logger.info(f"Successfully processed {len(cards_list)} cards from {set_name}")
-                    
-                elif response.status_code == 400:
-                    # Set might not have cards or name might be invalid
-                    logger.warning(f"No cards found for set: {set_name} (400 response)")
-                    processing_stats["processed_sets"] += 1
-                    
-                else:
-                    error_msg = f"API error for set {set_name}: HTTP {response.status_code}"
-                    logger.error(error_msg)
-                    processing_stats["failed_sets"] += 1
-                    processing_stats["processing_errors"].append({
-                        "set_name": set_name,
-                        "error": error_msg
-                    })
-                
-                # Rate limiting delay
-                time.sleep(request_delay)
-                
-            except requests.exceptions.Timeout:
-                error_msg = f"Timeout fetching cards for set: {set_name}"
-                logger.error(error_msg)
-                processing_stats["failed_sets"] += 1
-                processing_stats["processing_errors"].append({
-                    "set_name": set_name,
-                    "error": error_msg
-                })
-                
-            except Exception as e:
-                error_msg = f"Error processing set {set_name}: {str(e)}"
-                logger.error(error_msg)
-                processing_stats["failed_sets"] += 1
-                processing_stats["processing_errors"].append({
-                    "set_name": set_name,
-                    "error": error_msg
-                })
-        
-        # Upload variants to MongoDB
-        if all_variants:
-            logger.info(f"Uploading {len(all_variants)} card variants to MongoDB...")
-            
-            # Clear existing data in collection
-            delete_result = variants_collection.delete_many({})
-            logger.info(f"Cleared {delete_result.deleted_count} existing variant documents")
-            
-            # Insert new variants in batches to handle large datasets
-            batch_size = 1000
-            inserted_total = 0
-            
-            for i in range(0, len(all_variants), batch_size):
-                batch = all_variants[i:i + batch_size]
-                try:
-                    insert_result = variants_collection.insert_many(batch, ordered=False)
-                    inserted_total += len(insert_result.inserted_ids)
-                    logger.info(f"Inserted batch {i//batch_size + 1}: {len(insert_result.inserted_ids)} variants")
-                except Exception as e:
-                    logger.error(f"Error inserting batch {i//batch_size + 1}: {str(e)}")
-                    processing_stats["processing_errors"].append({
-                        "batch": f"{i//batch_size + 1}",
-                        "error": f"Batch insert error: {str(e)}"
-                    })
-            
-            processing_stats["unique_variants_created"] = inserted_total
-            
-            # Create indexes for better query performance
-            try:
-                variants_collection.create_index("_variant_id", unique=True)
-                variants_collection.create_index("card_id")
-                variants_collection.create_index("card_name")
-                variants_collection.create_index("set_code")
-                variants_collection.create_index("set_name")
-                variants_collection.create_index("set_rarity")
-                variants_collection.create_index([("card_id", 1), ("set_code", 1), ("set_rarity", 1)])
-                logger.info("Created indexes for card variants collection")
-            except Exception as e:
-                logger.error(f"Error creating indexes: {str(e)}")
-        
-        # Close MongoDB connection
-        client.close()
-        
-        # Calculate final statistics
-        processing_stats["success_rate"] = (
-            processing_stats["processed_sets"] / processing_stats["total_sets"] * 100
-            if processing_stats["total_sets"] > 0 else 0
+        result = await price_scraping_collection.replace_one(
+            query,
+            price_data,
+            upsert=True
         )
         
-        logger.info(f"Completed uploading card variants. Created {processing_stats['unique_variants_created']} unique variants")
-        
-        return jsonify({
-            "success": True,
-            "message": "Successfully uploaded card variants to MongoDB",
-            "collection_name": MONGODB_CARD_VARIANTS_COLLECTION,
-            "statistics": processing_stats,
-            "upload_timestamp": upload_timestamp.isoformat()
-        })
+        return result.upserted_id is not None or result.modified_count > 0
         
     except Exception as e:
-        logger.error(f"Unexpected error during variant upload: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": "Internal server error during variant upload"
-        }), 500
+        logger.error(f"Error saving price data: {e}")
+        return False
 
-@app.route('/cards/variants', methods=['GET'])
-def get_card_variants_from_cache():
-    """
-    Get all card variants from MongoDB cache
-    Returns: JSON response with cached card variants
-    """
+def extract_set_code(card_number: str) -> Optional[str]:
+    """Extract set code from card number."""
+    if not card_number:
+        return None
+    
+    # Most Yu-Gi-Oh card numbers follow the pattern: SETCODE-REGION###
+    match = re.match(r'^([A-Z]{2,4})-[A-Z]{2}\d+$', card_number.upper())
+    if match:
+        set_code = match.group(1)
+        logger.debug(f"Extracted set code: {set_code} from card number: {card_number}")
+        return set_code
+    
+    # Fallback: try to extract the first part before the hyphen
+    if '-' in card_number:
+        potential_set_code = card_number.split('-')[0].upper()
+        if len(potential_set_code) >= 2 and potential_set_code.isalpha():
+            logger.debug(f"Extracted set code (fallback): {potential_set_code} from card number: {card_number}")
+            return potential_set_code
+    
+    logger.debug(f"Could not extract set code from card number: {card_number}")
+    return None
+
+def extract_booster_set_name(source_url: str) -> Optional[str]:
+    """Extract booster set name from PriceCharting URL."""
+    if not source_url:
+        return None
+    
     try:
-        # Check MongoDB connection
-        if not MONGODB_CONNECTION_STRING:
+        url_parts = source_url.split('/')
+        if (len(url_parts) >= 5 and 
+            'yugioh-' in url_parts[4] and 
+            'yugioh-prime' not in url_parts[4]):
+            
+            game_slug = url_parts[4]
+            set_slug = game_slug.replace('yugioh-', '')
+            words = set_slug.split('-')
+            
+            readable_words = []
+            for word in words:
+                if word.lower() in ['of', 'the', 'and']:
+                    readable_words.append(word.lower())
+                else:
+                    readable_words.append(word.capitalize())
+            
+            return ' '.join(readable_words)
+            
+    except Exception as e:
+        logger.error(f"Error extracting booster set name: {e}")
+    
+    return None
+
+async def select_best_card_variant(
+    page, 
+    card_number: str, 
+    card_name: Optional[str], 
+    card_rarity: Optional[str], 
+    target_art_version: Optional[str]
+) -> Optional[str]:
+    """Enhanced variant selection logic matching the working YGOPyAPI implementation."""
+    try:
+        logger.debug("Using enhanced variant selection algorithm")
+        
+        # Extract all product links from search results
+        variants = await page.evaluate("""
+            () => {
+                const variants = [];
+                const rows = Array.from(document.querySelectorAll('#games_table tbody tr, .search-results tr'));
+                
+                rows.forEach(row => {
+                    const titleCell = row.querySelector('td.title');
+                    if (!titleCell) return;
+                    
+                    const link = titleCell.querySelector('a');
+                    if (!link) return;
+                    
+                    const href = link.getAttribute('href');
+                    const title = link.textContent.trim();
+                    
+                    // Get price if available
+                    const priceCell = row.querySelector('td.price.numeric.used_price');
+                    const priceText = priceCell ? priceCell.textContent.trim() : '';
+                    const price = parseFloat(priceText.replace(/[^0-9.]/g, '')) || 0;
+                    
+                    // Get game info
+                    const consoleInTitle = titleCell.querySelector('.console-in-title');
+                    const gameInfo = consoleInTitle ? consoleInTitle.textContent.trim() : '';
+                    
+                    if (href && href.includes('/game/')) {
+                        variants.push({
+                            title: title,
+                            href: href,
+                            price: price,
+                            gameInfo: gameInfo
+                        });
+                    }
+                });
+                
+                return variants;
+            }
+        """)
+        
+        if not variants:
+            logger.debug("No variants found in search results")
+            return None
+        
+        if len(variants) == 1:
+            logger.debug("Only one variant found, selecting automatically")
+            return variants[0]['href']
+        
+        logger.debug(f"Found {len(variants)} variants, evaluating best match...")
+        
+        # Phase 1: Fast-path selection for Quarter Century with art version
+        want_quarter_century = card_rarity and 'quarter century' in card_rarity.lower()
+        
+        if target_art_version and want_quarter_century:
+            logger.debug("FAST-PATH: Looking for exact Quarter Century variant with art version")
+            
+            for variant in variants:
+                title_lower = variant['title'].lower()
+                
+                # Check for Quarter Century and Secret Rare
+                has_quarter_century = 'quarter century' in title_lower
+                has_secret_rare = 'secret rare' in title_lower
+                
+                # Check for target art version in various formats
+                art_patterns = [
+                    f'[{target_art_version}',
+                    f'({target_art_version}',
+                    f'{target_art_version}th art',
+                    f'{target_art_version} art',
+                    f'{target_art_version}th quarter',
+                    f'{target_art_version} quarter'
+                ]
+                
+                has_target_art = any(pattern in title_lower for pattern in art_patterns)
+                
+                if has_quarter_century and has_secret_rare and has_target_art:
+                    logger.info(f"PERFECT MATCH: {variant['title']}")
+                    return variant['href']
+        
+        # Phase 2: Detailed scoring system
+        logger.debug("No perfect match found, using detailed scoring system...")
+        
+        normalized_target_rarity = normalize_rarity(card_rarity) if card_rarity else ''
+        candidates = []
+        
+        for variant in variants:
+            title = variant['title']
+            title_lower = title.lower()
+            score = 0
+            
+            # Score card number match
+            if card_number and card_number.lower() in title_lower:
+                score += 50
+            
+            # Score card name match
+            if card_name:
+                clean_card_name = re.sub(r'\b\d+(st|nd|rd|th)?\s*(art|artwork)\b', '', card_name.lower()).strip()
+                if clean_card_name in title_lower:
+                    score += 20
+            
+            # Score rarity match (critical for Quarter Century detection)
+            title_rarity = normalize_rarity(title)
+            title_has_quarter_century = 'quarter century' in title_rarity
+            
+            if 'quarter century' in normalized_target_rarity:
+                # We WANT Quarter Century
+                if title_has_quarter_century:
+                    logger.debug(f"QUARTER CENTURY MATCH: {title}")
+                    score += 800
+                    
+                    # Extra points for specific rarity type
+                    if 'secret' in normalized_target_rarity and 'secret' in title_rarity:
+                        score += 300
+                    elif 'ultra' in normalized_target_rarity and 'ultra' in title_rarity:
+                        score += 300
+                else:
+                    # Heavy penalty for missing Quarter Century when we want it
+                    score -= 800
+            elif title_has_quarter_century:
+                # We DON'T want Quarter Century but this has it
+                score -= 500
+            
+            # Score art version match
+            if target_art_version:
+                art_patterns = [
+                    f'{target_art_version}th art',
+                    f'{target_art_version} art',
+                    f'[{target_art_version}',
+                    f'({target_art_version}',
+                ]
+                
+                has_target_art = any(pattern in title_lower for pattern in art_patterns)
+                
+                if has_target_art:
+                    logger.debug(f"Art version match: {title}")
+                    score += 300
+                    
+                    # Bonus for combined art + Quarter Century
+                    if title_has_quarter_century and 'quarter century' in normalized_target_rarity:
+                        score += 500
+                else:
+                    # Check for wrong art version
+                    wrong_art_pattern = r'\b(\d+)(st|nd|rd|th)?\s*(art|artwork)\b|\[(\d+)(st|nd|rd|th)?\]|\((\d+)(st|nd|rd|th)?\)'
+                    if re.search(wrong_art_pattern, title_lower):
+                        score -= 350
+            
+            candidates.append({
+                'title': title,
+                'href': variant['href'],
+                'score': score,
+                'has_quarter_century': title_has_quarter_century
+            })
+        
+        # Sort by score (highest first)
+        candidates.sort(key=lambda x: x['score'], reverse=True)
+        
+        # Log top candidates
+        logger.debug("Top candidates after scoring:")
+        for i, candidate in enumerate(candidates[:5]):
+            logger.debug(f"{i+1}. Score {candidate['score']}: {candidate['title']}")
+        
+        # Safety check for rarity mismatch
+        if candidates:
+            top_candidate = candidates[0]
+            
+            # Special handling for non-Quarter Century requests
+            want_secret_rare = (normalized_target_rarity and 
+                              'secret rare' in normalized_target_rarity and 
+                              'quarter century' not in normalized_target_rarity)
+            
+            want_ultra_rare = (normalized_target_rarity and 
+                             'ultra rare' in normalized_target_rarity and 
+                             'quarter century' not in normalized_target_rarity)
+            
+            if ((want_secret_rare or want_ultra_rare) and 
+                not want_quarter_century and 
+                len(candidates) > 1 and 
+                top_candidate['has_quarter_century']):
+                
+                # Find non-Quarter Century alternative
+                non_qc_candidate = next((c for c in candidates if not c['has_quarter_century']), None)
+                
+                if non_qc_candidate:
+                    logger.info(f"SAFETY CHECK: Using regular variant: {non_qc_candidate['title']}")
+                    return non_qc_candidate['href']
+            
+            logger.info(f"SELECTED: {top_candidate['title']} (score: {top_candidate['score']})")
+            return top_candidate['href']
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error selecting card variant: {e}")
+        return None
+
+async def extract_prices_from_dom(page) -> Dict[str, Any]:
+    """Extract price data from PriceCharting product page DOM."""
+    try:
+        prices = await page.evaluate("""
+            () => {
+                // Helper function to extract price from text
+                const extractPrice = (text) => {
+                    if (!text) return null;
+                    const match = text.match(/\\$?([\\d,.]+)/);
+                    return match ? parseFloat(match[1].replace(/,/g, '')) : null;
+                };
+                
+                const result = {
+                    marketPrice: null,
+                    lowPrice: null,
+                    highPrice: null,
+                    grade: null,
+                    allGradePrices: {},
+                    tcgPlayerPrice: null,
+                    tcgPlayerUrl: null
+                };
+                
+                // Used price (ungraded)
+                const usedPriceElement = document.getElementById('used_price');
+                if (usedPriceElement) {
+                    const usedPrice = extractPrice(usedPriceElement.textContent);
+                    if (usedPrice) {
+                        result.marketPrice = usedPrice;
+                        result.grade = 'Ungraded';
+                        result.allGradePrices['Ungraded'] = usedPrice;
+                    }
+                }
+                
+                // Grade 7 (complete_price)
+                const completePriceElement = document.getElementById('complete_price');
+                if (completePriceElement) {
+                    const completePrice = extractPrice(completePriceElement.textContent);
+                    if (completePrice) {
+                        result.allGradePrices['Grade 7'] = completePrice;
+                    }
+                }
+                
+                // Grade 8 (new_price)
+                const newPriceElement = document.getElementById('new_price');
+                if (newPriceElement) {
+                    const newPrice = extractPrice(newPriceElement.textContent);
+                    if (newPrice) {
+                        result.allGradePrices['Grade 8'] = newPrice;
+                    }
+                }
+                
+                // Grade 9 (graded_price)
+                const gradedPriceElement = document.getElementById('graded_price');
+                if (gradedPriceElement) {
+                    const gradedPrice = extractPrice(gradedPriceElement.textContent);
+                    if (gradedPrice) {
+                        result.allGradePrices['Grade 9'] = gradedPrice;
+                    }
+                }
+                
+                // Grade 9.5 (box_only_price)
+                const boxOnlyPriceElement = document.getElementById('box_only_price');
+                if (boxOnlyPriceElement) {
+                    const boxOnlyPrice = extractPrice(boxOnlyPriceElement.textContent);
+                    if (boxOnlyPrice) {
+                        result.allGradePrices['Grade 9.5'] = boxOnlyPrice;
+                    }
+                }
+                
+                // PSA 10 (manual_only_price)
+                const manualOnlyPriceElement = document.getElementById('manual_only_price');
+                if (manualOnlyPriceElement) {
+                    const manualOnlyPrice = extractPrice(manualOnlyPriceElement.textContent);
+                    if (manualOnlyPrice) {
+                        result.allGradePrices['PSA 10'] = manualOnlyPrice;
+                    }
+                }
+                
+                // Find TCGPlayer price in compare prices section
+                const rows = Array.from(document.querySelectorAll('tr'));
+                const tcgPlayerRow = rows.find(row => 
+                    row.textContent.toLowerCase().includes('tcgplayer')
+                );
+                
+                if (tcgPlayerRow) {
+                    const cells = Array.from(tcgPlayerRow.querySelectorAll('td'));
+                    if (cells.length >= 2) {
+                        const priceCell = cells[1];
+                        if (priceCell) {
+                            const priceText = priceCell.textContent.trim();
+                            const priceMatch = priceText.match(/\\$?(\\d+\\.\\d{2})/);
+                            if (priceMatch && priceMatch[1]) {
+                                result.tcgPlayerPrice = parseFloat(priceMatch[1]);
+                            }
+                        }
+                    }
+                    
+                    // Find TCGPlayer link
+                    const tcgPlayerLinks = Array.from(tcgPlayerRow.querySelectorAll('a'));
+                    const seeItLink = tcgPlayerLinks.find(link => 
+                        link.textContent.toLowerCase().includes('see it')
+                    );
+                    
+                    if (seeItLink) {
+                        result.tcgPlayerUrl = seeItLink.href;
+                    } else if (tcgPlayerLinks.length > 0) {
+                        result.tcgPlayerUrl = tcgPlayerLinks[0].href;
+                    }
+                }
+                
+                return result;
+            }
+        """)
+        
+        return prices
+        
+    except Exception as e:
+        logger.error(f"Error extracting prices from DOM: {e}")
+        return {}
+
+async def scrape_price_from_pricecharting(
+    card_number: str,
+    card_name: Optional[str] = None,
+    card_rarity: Optional[str] = None,
+    art_variant: Optional[str] = None
+) -> Optional[Dict]:
+    """Scrape price data from pricecharting.com using Playwright."""
+    try:
+        from playwright.async_api import async_playwright
+        
+        # Extract art version from card name if not provided
+        if not art_variant and card_name:
+            art_variant = extract_art_version(card_name)
+        
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+            )
+            page = await context.new_page()
+            
+            # Search using card number - FIXED URL TO MATCH WORKING YGOPyAPI
+            search_query = card_number.strip()
+            search_url = f"https://www.pricecharting.com/search-products?q={quote(search_query)}&type=prices"
+            
+            logger.info(f"Searching PriceCharting for: {search_query}")
+            await page.goto(search_url, wait_until='networkidle', timeout=30000)
+            
+            # Check if we landed directly on a product page
+            is_product_page = await page.evaluate("() => document.getElementById('product_name') !== null")
+            
+            if not is_product_page:
+                # We're on search results, select best variant
+                best_variant_url = await select_best_card_variant(
+                    page, card_number, card_name, card_rarity, art_variant
+                )
+                
+                if best_variant_url:
+                    logger.info(f"Selected best variant: {best_variant_url}")
+                    await page.goto(best_variant_url, wait_until='networkidle', timeout=30000)
+                else:
+                    logger.warning(f"No suitable variant found for {card_number}")
+                    await browser.close()
+                    return None
+            
+            # Extract prices from the product page
+            price_data = await extract_prices_from_dom(page)
+            
+            if not price_data:
+                logger.warning(f"No price data extracted for {card_number}")
+                await browser.close()
+                return None
+            
+            # Get final page URL and title
+            final_url = page.url
+            page_title = await page.title()
+            
+            # Extract set code and booster set name
+            set_code = extract_set_code(card_number)
+            booster_set_name = extract_booster_set_name(final_url)
+            
+            await browser.close()
+            
+            # Create price record
+            price_record = {
+                "card_number": card_number,
+                "card_name": card_name or page_title,
+                "card_art_variant": art_variant,
+                "card_rarity": card_rarity,
+                "set_code": set_code,
+                "booster_set_name": booster_set_name,
+                "tcg_price": price_data.get('tcgPlayerPrice'),
+                "pc_ungraded_price": price_data.get('marketPrice'),
+                "pc_grade7": price_data.get('allGradePrices', {}).get('Grade 7'),
+                "pc_grade8": price_data.get('allGradePrices', {}).get('Grade 8'),
+                "pc_grade9": price_data.get('allGradePrices', {}).get('Grade 9'),
+                "pc_grade9_5": price_data.get('allGradePrices', {}).get('Grade 9.5'),
+                "pc_grade10": price_data.get('allGradePrices', {}).get('PSA 10'),
+                "source_url": final_url,
+                "scrape_success": True,
+                "last_price_updt": datetime.utcnow()
+            }
+            
+            return price_record
+            
+    except Exception as e:
+        logger.error(f"Error scraping prices for {card_number}: {e}")
+        return {
+            "card_number": card_number,
+            "card_name": card_name or '',
+            "card_art_variant": art_variant,
+            "card_rarity": card_rarity,
+            "scrape_success": False,
+            "error_message": str(e),
+            "last_price_updt": datetime.utcnow()
+        }
+
+# Card price scraping endpoint
+@app.route('/cards/price', methods=['POST'])
+def scrape_card_price():
+    """Scrape price data for a specific card from PriceCharting."""
+    try:
+        data = request.get_json()
+        
+        if not data:
             return jsonify({
                 "success": False,
-                "error": "MongoDB connection string not configured"
-            }), 500
+                "error": "Request body must be JSON"
+            }), 400
         
-        # Get MongoDB client
-        client = get_mongo_client()
-        if not client:
+        card_number = data.get('card_number')
+        if not card_number:
             return jsonify({
                 "success": False,
-                "error": "Failed to connect to MongoDB"
-            }), 500
+                "error": "card_number is required"
+            }), 400
         
-        # Get database and collection
-        db = client.get_default_database()
-        collection = db[MONGODB_CARD_VARIANTS_COLLECTION]
+        card_name = data.get('card_name')
+        card_rarity = data.get('card_rarity')
+        art_variant = data.get('art_variant')
+        force_refresh = data.get('force_refresh', False)
         
-        # Get pagination parameters from query string
-        from flask import request
-        page = int(request.args.get('page', 1))
-        limit = int(request.args.get('limit', 100))
-        skip = (page - 1) * limit
+        logger.info(f"Price request for card: {card_number}, name: {card_name}, rarity: {card_rarity}, art: {art_variant}")
         
-        # Get documents with pagination (excluding MongoDB internal _id field)
-        cursor = collection.find({}, {"_id": 0}).skip(skip).limit(limit)
-        variants = list(cursor)
-        
-        # Get total count
-        total_count = collection.count_documents({})
-        
-        # Get cache metadata if available
-        cache_info = None
-        if variants:
-            cache_info = {
-                "last_updated": variants[0].get('_uploaded_at'),
-                "source": variants[0].get('_source')
+        async def get_price_data():
+            await initialize_price_scraping()
+            
+            # Check cache first unless force refresh is requested
+            if not force_refresh:
+                is_fresh, cached_data = await find_cached_price_data(
+                    card_number=card_number,
+                    card_name=card_name,
+                    card_rarity=card_rarity,
+                    art_variant=art_variant
+                )
+                
+                if is_fresh and cached_data:
+                    logger.info(f"Using cached price data for {card_number}")
+                    cache_age = datetime.utcnow() - cached_data.get('last_price_updt', datetime.utcnow())
+                    
+                    return {
+                        "success": True,
+                        "data": {
+                            "card_number": cached_data.get('card_number'),
+                            "card_name": cached_data.get('card_name'),
+                            "card_art_variant": cached_data.get('card_art_variant'),
+                            "card_rarity": cached_data.get('card_rarity'),
+                            "set_code": cached_data.get('set_code'),
+                            "booster_set_name": cached_data.get('booster_set_name'),
+                            "tcg_price": cached_data.get('tcg_price'),
+                            "pc_ungraded_price": cached_data.get('pc_ungraded_price'),
+                            "pc_grade7": cached_data.get('pc_grade7'),
+                            "pc_grade8": cached_data.get('pc_grade8'),
+                            "pc_grade9": cached_data.get('pc_grade9'),
+                            "pc_grade9_5": cached_data.get('pc_grade9_5'),
+                            "pc_grade10": cached_data.get('pc_grade10'),
+                            "last_price_updt": cached_data.get('last_price_updt'),
+                            "source_url": cached_data.get('source_url'),
+                            "is_cached": True,
+                            "cache_age_hours": cache_age.total_seconds() / 3600
+                        },
+                        "message": "Price data retrieved from cache"
+                    }
+            
+            # Scrape fresh data
+            logger.info(f"Scraping fresh price data for {card_number}")
+            price_data = await scrape_price_from_pricecharting(
+                card_number=card_number,
+                card_name=card_name,
+                card_rarity=card_rarity,
+                art_variant=art_variant
+            )
+            
+            if not price_data:
+                return {
+                    "success": False,
+                    "error": "Failed to scrape price data"
+                }
+            
+            # Save to cache
+            saved = await save_price_data(price_data)
+            if not saved:
+                logger.warning(f"Failed to save price data to cache for {card_number}")
+            
+            return {
+                "success": True,
+                "data": price_data,
+                "message": "Price data scraped successfully"
             }
         
-        # Close MongoDB connection
-        client.close()
+        # Run the async function
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(get_price_data())
+        finally:
+            loop.close()
         
-        logger.info(f"Retrieved {len(variants)} card variants from MongoDB cache (page {page})")
-        
-        return jsonify({
-            "success": True,
-            "data": variants,
-            "pagination": {
-                "current_page": page,
-                "per_page": limit,
-                "total_count": total_count,
-                "total_pages": (total_count + limit - 1) // limit,
-                "has_next": skip + len(variants) < total_count,
-                "has_prev": page > 1
-            },
-            "cache_info": cache_info,
-            "message": f"Retrieved {len(variants)} card variants from cache"
-        })
+        if result.get("success"):
+            return jsonify(result)
+        else:
+            return jsonify(result), 500
         
     except Exception as e:
-        logger.error(f"Error retrieving card variants from cache: {str(e)}")
+        logger.error(f"Error in price scraping endpoint: {e}")
         return jsonify({
             "success": False,
-            "error": "Failed to retrieve card variants from cache"
+            "error": f"Internal error: {str(e)}"
         }), 500
 
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({
-        "success": False,
-        "error": "Endpoint not found"
-    }), 404
-
-@app.errorhandler(500)
-def internal_error(error):
-    return jsonify({
-        "success": False,
-        "error": "Internal server error"
-    }), 500
+@app.route('/cards/price/cache-stats', methods=['GET'])
+def get_price_cache_stats():
+    """Get statistics about the price cache collection."""
+    try:
+        async def get_stats():
+            await initialize_price_scraping()
+            
+            if price_scraping_collection is None:
+                return {"error": "Database not connected"}
+            
+            try:
+                total_records = await price_scraping_collection.count_documents({})
+                
+                # Count fresh records
+                expiry_date = datetime.utcnow() - timedelta(days=CACHE_EXPIRY_DAYS)
+                fresh_records = await price_scraping_collection.count_documents({
+                    "last_price_updt": {"$gt": expiry_date}
+                })
+                
+                # Count successful scrapes
+                successful_records = await price_scraping_collection.count_documents({
+                    "scrape_success": True
+                })
+                
+                return {
+                    "success": True,
+                    "stats": {
+                        "total_records": total_records,
+                        "fresh_records": fresh_records,
+                        "stale_records": total_records - fresh_records,
+                        "successful_records": successful_records,
+                        "failed_records": total_records - successful_records,
+                        "cache_expiry_days": CACHE_EXPIRY_DAYS,
+                        "collection_name": PRICE_CACHE_COLLECTION
+                    }
+                }
+                
+            except Exception as e:
+                logger.error(f"Error getting cache stats: {e}")
+                return {"success": False, "error": str(e)}
+        
+        # Run the async function
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(get_stats())
+        finally:
+            loop.close()
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        logger.error(f"Error getting cache stats: {e}")
+        return jsonify({
+            "success": False,
+            "error": "Failed to get cache statistics"
+        }), 500
 
 if __name__ == '__main__':
-    print("Starting YGO Card Sets API...")
-    print("Available endpoints:")
-    print("  GET /health - Health check")
-    print("  GET /card-sets - Get all card sets")
-    print("  GET /card-sets/search/<set_name> - Search card sets by name")
-    print("  POST /card-sets/upload - Upload card sets to MongoDB")
-    print("  GET /card-sets/from-cache - Get card sets from MongoDB cache")
-    print("  POST /card-sets/fetch-all-cards - Fetch all cards from all cached sets")
-    print("  GET /card-sets/<set_name>/cards - Get all cards from a specific set")
-    print("  GET /card-sets/count - Get total count of card sets")
-    print("  POST /cards/upload-variants - Upload card variants to MongoDB")
-    print("  GET /cards/variants - Get card variants from MongoDB cache")
-    
-    app.run(debug=True, host='0.0.0.0', port=5001)
+    app.run(debug=True, host='0.0.0.0', port=8080)
