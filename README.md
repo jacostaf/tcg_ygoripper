@@ -1,12 +1,13 @@
 # YGO PY GUY - Yu-Gi-Oh! Card Database API
 
-A comprehensive Flask API for fetching, caching, and managing Yu-Gi-Oh! card data using the YGOPRODeck API and MongoDB.
+A comprehensive Flask API for fetching, caching, and managing Yu-Gi-Oh! card data using the YGOPRODeck API and MongoDB, with integrated price scraping from PriceCharting.com.
 
 ## Features
 
 - **Card Sets Management**: Fetch and cache all Yu-Gi-Oh! card sets
 - **Card Variants Database**: Create unique entries for each card variant (different rarities, sets, and artworks)
-- **MongoDB Integration**: Efficient caching and storage of card data
+- **Price Scraping**: Automated price collection from PriceCharting.com with intelligent variant selection
+- **MongoDB Integration**: Efficient caching and storage of card data and pricing information
 - **Rate Limiting Compliance**: Respects YGOPRODeck API rate limits (20 requests/second)
 - **Comprehensive API**: Multiple endpoints for different data access patterns
 
@@ -25,6 +26,10 @@ A comprehensive Flask API for fetching, caching, and managing Yu-Gi-Oh! card dat
 - `GET /card-sets/<set_name>/cards` - Get all cards from a specific set
 - `POST /cards/upload-variants` - Upload card variants to MongoDB
 - `GET /cards/variants` - Get card variants with pagination
+
+### Price Data
+- `POST /cards/price` - Scrape price data for a specific card from PriceCharting.com
+- `GET /cards/price/cache-stats` - Get statistics about the price cache collection
 
 ## Setup
 
@@ -68,14 +73,59 @@ The API will be available at `http://localhost:5001`
 
 - `YGO_SETS_CACHE_V1` - Cached card sets
 - `YGO_CARD_VARIANT_CACHE_V1` - Unique card variants
+- `YGO_CARD_VARIANT_PRICE_CACHE_V1` - Cached price data with multiple grade levels
+
+## Price Scraping Features
+
+### Intelligent Variant Selection
+- Automatically selects the best matching card variant based on:
+  - Card number matching
+  - Rarity matching (Quarter Century, Platinum Secret Rare, etc.)
+  - Art version matching (1st Art, 7th Art, etc.)
+  - Advanced scoring algorithm for precise variant identification
+
+### Price Data Collection
+- **TCGPlayer Prices**: Market prices from TCGPlayer
+- **Graded Card Prices**: Multiple PSA grade levels (7, 8, 9, 9.5, 10)
+- **Ungraded Prices**: Raw card market values
+- **Smart Caching**: 7-day cache expiry with force refresh option
+
+### Supported Card Features
+- Quarter Century Secret/Ultra Rare variants
+- Platinum Secret Rare variants
+- Multiple art versions (1st, 2nd, 3rd, etc.)
+- Set-specific rarities and variants
+
+## API Usage Examples
+
+### Scrape Card Price
+```bash
+curl -X POST http://localhost:8080/cards/price \
+  -H "Content-Type: application/json" \
+  -d '{
+    "card_number": "BLTR-EN051",
+    "card_name": "Blue-Eyes White Dragon",
+    "card_rarity": "Quarter Century Secret Rare",
+    "art_variant": "7th"
+  }'
+```
+
+### Get Cache Statistics
+```bash
+curl http://localhost:8080/cards/price/cache-stats
+```
 
 ## Data Sources
 
-This project uses the [YGOPRODeck API](https://ygoprodeck.com/api-guide/) for all Yu-Gi-Oh! card data.
+This project uses:
+- [YGOPRODeck API](https://ygoprodeck.com/api-guide/) for all Yu-Gi-Oh! card data
+- [PriceCharting.com](https://www.pricecharting.com/) for market price data and graded card values
 
 ## Rate Limiting
 
-The application includes built-in rate limiting to comply with YGOPRODeck API limits (20 requests per second with 100ms delays between requests).
+The application includes built-in rate limiting to comply with:
+- YGOPRODeck API limits (20 requests per second with 100ms delays between requests)
+- PriceCharting.com scraping with respectful delays and browser automation
 
 ## License
 

@@ -77,7 +77,7 @@ class CardPriceModel(BaseModel):
     card_art_variant: Optional[str] = Field(None, description="Art version (e.g., '7', '1st', etc.)")
     booster_set_name: Optional[str] = Field(None, description="Booster set name where card is from")
     set_code: Optional[str] = Field(None, description="4-character set code (e.g., BLTR, SUDA, RA04)")
-    card_rarity: Optional[str] = Field(None, description="Card rarity (e.g., Secret Rare, Ultra Rare)")
+    card_rarity: str = Field(..., description="Card rarity (e.g., Secret Rare, Ultra Rare) - REQUIRED")
     
     # Pricing data fields
     tcg_price: Optional[float] = Field(None, description="TCGPlayer price")
@@ -216,33 +216,134 @@ async def find_cached_price_data(
         logger.error(f"Error checking cached price data: {e}")
         return False, None
 
-async def save_price_data(price_data: Dict) -> bool:
-    """Save price data to MongoDB."""
-    if price_scraping_collection is None:
+async def validate_card_rarity(card_number: str, card_rarity: str) -> bool:
+    """Validate the requested rarity against available rarities for the card in YGO_CARD_VARIANT_CACHE_V1."""
+    if not card_rarity or not card_number:
         return False
     
     try:
+        # Initialize MongoDB connection if needed
+        if price_scraping_client is None:
+            await initialize_price_scraping()
+        
+        # Get the card variants collection
+        db = price_scraping_client.get_default_database()
+        variants_collection = db[MONGODB_CARD_VARIANTS_COLLECTION]
+        
+        # Search for the card in the variants collection
+        # Look for cards with matching card number
+        query = {"card_sets.set_rarity_code": {"$regex": f"^{re.escape(card_number)}", "$options": "i"}}
+        
+        card_document = await variants_collection.find_one(query)
+        
+        if not card_document:
+            logger.warning(f"Card {card_number} not found in YGO_CARD_VARIANT_CACHE_V1")
+            # If card is not found in our database, allow the rarity (fallback)
+            return True
+        
+        # Extract available rarities from the card document
+        available_rarities = set()
+        card_sets = card_document.get('card_sets', [])
+        
+        for card_set in card_sets:
+            rarity = card_set.get('rarity')
+            if rarity:
+                available_rarities.add(rarity.lower().strip())
+        
+        # Normalize the requested rarity for comparison
+        normalized_requested = normalize_rarity(card_rarity)
+        
+        # Check if the normalized requested rarity matches any available rarity
+        for available_rarity in available_rarities:
+            normalized_available = normalize_rarity(available_rarity)
+            
+            # Check for exact match
+            if normalized_requested == normalized_available:
+                logger.info(f"Rarity '{card_rarity}' validated for card {card_number}")
+                return True
+            
+            # Check for partial matches (e.g., "quarter century secret rare" contains "secret rare")
+            if (normalized_requested in normalized_available or 
+                normalized_available in normalized_requested):
+                logger.info(f"Rarity '{card_rarity}' partially validated for card {card_number}")
+                return True
+        
+        logger.warning(f"Rarity '{card_rarity}' not found for card {card_number}. Available rarities: {list(available_rarities)}")
+        return False
+        
+    except Exception as e:
+        logger.error(f"Error validating card rarity: {e}")
+        # Return True on error to avoid blocking valid requests
+        return True
+
+async def save_price_data(price_data: Dict) -> bool:
+    """Save price data to MongoDB with improved validation and error handling."""
+    if price_scraping_collection is None:
+        logger.error("Price scraping collection not initialized")
+        return False
+    
+    try:
+        # Validate required fields
+        if not price_data.get("card_number"):
+            logger.error("Cannot save price data: card_number is required")
+            return False
+        
+        if not price_data.get("card_rarity"):
+            logger.error("Cannot save price data: card_rarity is required")
+            return False
+        
         # Update timestamp
         price_data['last_price_updt'] = datetime.utcnow()
         
-        # Use upsert to replace existing record
-        query = {
-            "card_number": price_data["card_number"],
-            "card_name": price_data["card_name"],
-            "card_rarity": price_data.get("card_rarity"),
-            "card_art_variant": price_data.get("card_art_variant")
-        }
+        # Build query for upsert - handle empty strings properly
+        query = {"card_number": price_data["card_number"]}
         
-        # Remove None values from query
-        query = {k: v for k, v in query.items() if v is not None}
+        # Only add non-empty fields to the query
+        card_name = price_data.get("card_name")
+        if card_name and card_name.strip():
+            query["card_name"] = card_name.strip()
+        
+        card_rarity = price_data.get("card_rarity")
+        if card_rarity and card_rarity.strip():
+            query["card_rarity"] = card_rarity.strip()
+        
+        card_art_variant = price_data.get("card_art_variant")
+        if card_art_variant and card_art_variant.strip():
+            query["card_art_variant"] = card_art_variant.strip()
+        
+        logger.info(f"Saving price data with query: {query}")
+        
+        # Clean the price_data before saving - remove empty strings
+        cleaned_data = {}
+        for key, value in price_data.items():
+            if value is not None:
+                if isinstance(value, str):
+                    # Only keep non-empty strings
+                    if value.strip():
+                        cleaned_data[key] = value.strip()
+                else:
+                    cleaned_data[key] = value
+        
+        # Ensure required fields are present in cleaned data
+        if "card_rarity" not in cleaned_data:
+            logger.error("card_rarity missing from cleaned data")
+            return False
         
         result = await price_scraping_collection.replace_one(
             query,
-            price_data,
+            cleaned_data,
             upsert=True
         )
         
-        return result.upserted_id is not None or result.modified_count > 0
+        if result.upserted_id:
+            logger.info(f"Created new price record with ID: {result.upserted_id}")
+            return True
+        elif result.modified_count > 0:
+            logger.info(f"Updated existing price record, modified {result.modified_count} document(s)")
+            return True
+        else:
+            logger.warning("No documents were created or modified")
+            return False
         
     except Exception as e:
         logger.error(f"Error saving price data: {e}")
@@ -462,25 +563,33 @@ async def select_best_card_variant(
                 else:
                     # Check if this could be a Platinum variant without explicit labeling
                     # Many Platinum variants just show the art version without "Platinum" in title
-                    if (target_art_version and 
-                        not title_has_quarter_century and  # Not Quarter Century
-                        not any(common_rarity in title_rarity for common_rarity in ['ultra rare', 'super rare', 'rare']) and  # Not other common rarities
-                        re.search(rf'\[{target_art_number}(st|nd|rd|th)?\]', title_lower)):  # Has matching art in brackets
+                    if target_art_version:
+                        # Extract the numeric part from target_art_version
+                        target_art_number_match = re.search(r'(\d+)', target_art_version)
+                        target_art_number = target_art_number_match.group(1) if target_art_number_match else target_art_version
                         
-                        logger.debug(f"IMPLICIT PLATINUM MATCH (art-based): {title}")
-                        score += 600  # Lower than explicit Platinum but higher than penalties
-                        logger.debug(f"  +600 implicit platinum: {score}")
+                        if (not title_has_quarter_century and  # Not Quarter Century
+                            not any(common_rarity in title_rarity for common_rarity in ['ultra rare', 'super rare', 'rare']) and  # Not other common rarities
+                            re.search(rf'\[{target_art_number}(st|nd|rd|th)?\]', title_lower)):  # Has matching art in brackets
+                            
+                            logger.debug(f"IMPLICIT PLATINUM MATCH (art-based): {title}")
+                            score += 600  # Lower than explicit Platinum but higher than penalties
+                            logger.debug(f"  +600 implicit platinum: {score}")
+                        else:
+                            # Heavy penalty for missing Platinum when we want it
+                            score -= 800
+                            logger.debug(f"  -800 missing platinum: {score}")
                     else:
                         # Heavy penalty for missing Platinum when we want it
                         score -= 800
                         logger.debug(f"  -800 missing platinum: {score}")
                         
-                        # Extra penalty if this is a Quarter Century variant (wrong rarity)
-                        if title_has_quarter_century:
-                            score -= 500
-                            logger.debug(f"QUARTER CENTURY PENALTY (want Platinum): {title}")
-                            logger.debug(f"  -500 QC penalty: {score}")
-                        
+                    # Extra penalty if this is a Quarter Century variant (wrong rarity)
+                    if title_has_quarter_century:
+                        score -= 500
+                        logger.debug(f"QUARTER CENTURY PENALTY (want Platinum): {title}")
+                        logger.debug(f"  -500 QC penalty: {score}")
+            
             # Handle other rarity requests (Secret Rare, Ultra Rare, etc.)
             elif normalized_target_rarity:
                 # We want a specific non-Quarter Century, non-Platinum rarity
@@ -844,21 +953,38 @@ def scrape_card_price():
             }), 400
         
         card_number = data.get('card_number')
-        if not card_number:
+        if not card_number or not card_number.strip():
             return jsonify({
                 "success": False,
-                "error": "card_number is required"
-            }, 400)
+                "error": "card_number is required and cannot be empty"
+            }), 400
         
-        card_name = data.get('card_name')
-        card_rarity = data.get('card_rarity')
-        art_variant = data.get('art_variant')
+        card_name = data.get('card_name', '').strip() if data.get('card_name') else None
+        card_rarity = data.get('card_rarity', '').strip() if data.get('card_rarity') else None
+        art_variant = data.get('art_variant', '').strip() if data.get('art_variant') else None
         force_refresh = data.get('force_refresh', False)
+        
+        # Validate that card_rarity is provided
+        if not card_rarity:
+            return jsonify({
+                "success": False,
+                "error": "card_rarity is required and cannot be empty"
+            }), 400
         
         logger.info(f"Price request for card: {card_number}, name: {card_name}, rarity: {card_rarity}, art: {art_variant}")
         
         async def get_price_data():
             await initialize_price_scraping()
+            
+            # Validate card rarity against YGO_CARD_VARIANT_CACHE_V1
+            logger.info(f"Validating rarity '{card_rarity}' for card {card_number}")
+            is_valid_rarity = await validate_card_rarity(card_number, card_rarity)
+            
+            if not is_valid_rarity:
+                return {
+                    "success": False,
+                    "error": f"Invalid rarity '{card_rarity}' for card {card_number}. Please check the card variant database for available rarities."
+                }
             
             # Check cache first unless force refresh is requested
             if not force_refresh:
@@ -916,11 +1042,15 @@ def scrape_card_price():
             saved = await save_price_data(price_data)
             if not saved:
                 logger.warning(f"Failed to save price data to cache for {card_number}")
+                return {
+                    "success": False,
+                    "error": "Price data scraped but failed to save to cache"
+                }
             
             return {
                 "success": True,
                 "data": price_data,
-                "message": "Price data scraped successfully"
+                "message": "Price data scraped and saved successfully"
             }
         
         # Run the async function
@@ -934,7 +1064,7 @@ def scrape_card_price():
         if result.get("success"):
             return jsonify(result)
         else:
-            return jsonify(result), 500
+            return jsonify(result), 400 if "Invalid rarity" in result.get("error", "") else 500
         
     except Exception as e:
         logger.error(f"Error in price scraping endpoint: {e}")
