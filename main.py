@@ -20,7 +20,7 @@ load_dotenv()
 app = Flask(__name__)
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)  # Changed from INFO to DEBUG
 logger = logging.getLogger(__name__)
 
 # YGO API base URL
@@ -349,9 +349,10 @@ async def select_best_card_variant(
             }
         """)
         
-        if not variants:
-            logger.debug("No variants found in search results")
-            return None
+        # Log all found variants for debugging
+        logger.info(f"Found {len(variants)} variants for {card_number}:")
+        for i, variant in enumerate(variants[:10]):  # Log first 10 variants
+            logger.info(f"  {i+1}. {variant['title']}")
         
         if len(variants) == 1:
             logger.debug("Only one variant found, selecting automatically")
@@ -399,20 +400,26 @@ async def select_best_card_variant(
             title_lower = title.lower()
             score = 0
             
+            logger.debug(f"Scoring variant: {title}")
+            
             # Score card number match
             if card_number and card_number.lower() in title_lower:
                 score += 50
+                logger.debug(f"  +50 card number match: {score}")
             
             # Score card name match
             if card_name:
                 clean_card_name = re.sub(r'\b\d+(st|nd|rd|th)?\s*(art|artwork)\b', '', card_name.lower()).strip()
                 if clean_card_name in title_lower:
                     score += 20
+                    logger.debug(f"  +20 card name match: {score}")
             
             # Score rarity match (critical for Quarter Century vs Platinum detection)
             title_rarity = normalize_rarity(title)
             title_has_quarter_century = 'quarter century' in title_rarity
             title_has_platinum = 'platinum' in title_rarity
+            
+            logger.debug(f"  title_rarity: '{title_rarity}', QC: {title_has_quarter_century}, Platinum: {title_has_platinum}")
             
             # Handle Quarter Century requests
             if 'quarter century' in normalized_target_rarity:
@@ -420,20 +427,25 @@ async def select_best_card_variant(
                 if title_has_quarter_century:
                     logger.debug(f"QUARTER CENTURY MATCH: {title}")
                     score += 800
+                    logger.debug(f"  +800 QC match: {score}")
                     
                     # Extra points for specific rarity type
                     if 'secret' in normalized_target_rarity and 'secret' in title_rarity:
                         score += 300
+                        logger.debug(f"  +300 secret match: {score}")
                     elif 'ultra' in normalized_target_rarity and 'ultra' in title_rarity:
                         score += 300
+                        logger.debug(f"  +300 ultra match: {score}")
                 else:
                     # Heavy penalty for missing Quarter Century when we want it
                     score -= 800
+                    logger.debug(f"  -800 missing QC: {score}")
                     
                     # Extra penalty if this is a Platinum variant (wrong rarity)
                     if title_has_platinum:
                         score -= 500
                         logger.debug(f"PLATINUM PENALTY (want QC): {title}")
+                        logger.debug(f"  -500 platinum penalty: {score}")
                         
             # Handle Platinum requests
             elif 'platinum' in normalized_target_rarity:
@@ -441,18 +453,33 @@ async def select_best_card_variant(
                 if title_has_platinum:
                     logger.debug(f"PLATINUM MATCH: {title}")
                     score += 800
+                    logger.debug(f"  +800 platinum match: {score}")
                     
                     # Extra points for specific rarity type
                     if 'secret' in normalized_target_rarity and 'secret' in title_rarity:
                         score += 300
+                        logger.debug(f"  +300 secret match: {score}")
                 else:
-                    # Heavy penalty for missing Platinum when we want it
-                    score -= 800
-                    
-                    # Extra penalty if this is a Quarter Century variant (wrong rarity)
-                    if title_has_quarter_century:
-                        score -= 500
-                        logger.debug(f"QUARTER CENTURY PENALTY (want Platinum): {title}")
+                    # Check if this could be a Platinum variant without explicit labeling
+                    # Many Platinum variants just show the art version without "Platinum" in title
+                    if (target_art_version and 
+                        not title_has_quarter_century and  # Not Quarter Century
+                        not any(common_rarity in title_rarity for common_rarity in ['ultra rare', 'super rare', 'rare']) and  # Not other common rarities
+                        re.search(rf'\[{target_art_number}(st|nd|rd|th)?\]', title_lower)):  # Has matching art in brackets
+                        
+                        logger.debug(f"IMPLICIT PLATINUM MATCH (art-based): {title}")
+                        score += 600  # Lower than explicit Platinum but higher than penalties
+                        logger.debug(f"  +600 implicit platinum: {score}")
+                    else:
+                        # Heavy penalty for missing Platinum when we want it
+                        score -= 800
+                        logger.debug(f"  -800 missing platinum: {score}")
+                        
+                        # Extra penalty if this is a Quarter Century variant (wrong rarity)
+                        if title_has_quarter_century:
+                            score -= 500
+                            logger.debug(f"QUARTER CENTURY PENALTY (want Platinum): {title}")
+                            logger.debug(f"  -500 QC penalty: {score}")
                         
             # Handle other rarity requests (Secret Rare, Ultra Rare, etc.)
             elif normalized_target_rarity:
@@ -461,47 +488,81 @@ async def select_best_card_variant(
                     # We DON'T want Quarter Century but this has it
                     score -= 500
                     logger.debug(f"UNWANTED QUARTER CENTURY: {title}")
+                    logger.debug(f"  -500 unwanted QC: {score}")
                 elif title_has_platinum:
                     # We DON'T want Platinum but this has it
                     score -= 500
                     logger.debug(f"UNWANTED PLATINUM: {title}")
+                    logger.debug(f"  -500 unwanted platinum: {score}")
                 else:
                     # Check for exact rarity match
                     if normalized_target_rarity in title_rarity:
                         score += 400
                         logger.debug(f"EXACT RARITY MATCH: {title}")
+                        logger.debug(f"  +400 exact rarity: {score}")
                     # Check for partial rarity match
                     elif any(word in title_rarity for word in normalized_target_rarity.split()):
                         score += 200
                         logger.debug(f"PARTIAL RARITY MATCH: {title}")
+                        logger.debug(f"  +200 partial rarity: {score}")
             else:
-                # No specific rarity requested, slight penalty for special rarities
+                # No specific rarity requested, slight penalty for art variants
                 if title_has_quarter_century or title_has_platinum:
                     score -= 100
+                    logger.debug(f"  -100 special rarity penalty: {score}")
             
-            # Score art version match
+            # Score art version match (critical for distinguishing variants)
             if target_art_version:
+                # Extract the numeric part from target_art_version (e.g., "7th Art" -> "7", "7" -> "7")
+                target_art_number = re.search(r'(\d+)', target_art_version)
+                target_art_number = target_art_number.group(1) if target_art_number else target_art_version
+                
                 art_patterns = [
-                    f'{target_art_version}th art',
-                    f'{target_art_version} art',
-                    f'[{target_art_version}',
-                    f'({target_art_version}',
+                    f'{target_art_version}',  # Exact match
+                    f'{target_art_number}th art',
+                    f'{target_art_number} art',
+                    f'[{target_art_number}',
+                    f'({target_art_number}',
+                    f'{target_art_number}th]',
+                    f'{target_art_number}]',
+                    f'[{target_art_number}th',
+                    f'({target_art_number}th',
                 ]
                 
                 has_target_art = any(pattern in title_lower for pattern in art_patterns)
                 
                 if has_target_art:
                     logger.debug(f"Art version match: {title}")
-                    score += 300
+                    score += 500  # Increased from 300 to make art matching more important
+                    logger.debug(f"  +500 art match: {score}")
                     
-                    # Bonus for combined art + Quarter Century
+                    # Extra bonus for combined art + Quarter Century
                     if title_has_quarter_century and 'quarter century' in normalized_target_rarity:
-                        score += 500
+                        score += 300
+                        logger.debug(f"  +300 art+QC bonus: {score}")
+                    # Extra bonus for combined art + Platinum
+                    elif title_has_platinum and 'platinum' in normalized_target_rarity:
+                        score += 300
+                        logger.debug(f"  +300 art+platinum bonus: {score}")
                 else:
-                    # Check for wrong art version
+                    # Check for wrong art version - HEAVY PENALTY
                     wrong_art_pattern = r'\b(\d+)(st|nd|rd|th)?\s*(art|artwork)\b|\[(\d+)(st|nd|rd|th)?\]|\((\d+)(st|nd|rd|th)?\)'
-                    if re.search(wrong_art_pattern, title_lower):
-                        score -= 350
+                    wrong_art_match = re.search(wrong_art_pattern, title_lower)
+                    if wrong_art_match:
+                        # Extract the art number from the wrong match
+                        wrong_art_number = wrong_art_match.group(1) or wrong_art_match.group(4)
+                        if wrong_art_number and wrong_art_number != target_art_number:
+                            score -= 600  # Heavy penalty for wrong art version
+                            logger.debug(f"WRONG ART PENALTY ({wrong_art_number} vs {target_art_version}): {title}")
+                            logger.debug(f"  -600 wrong art: {score}")
+            else:
+                # If no art version specified, slight penalty for art variants
+                art_pattern = r'\b(\d+)(st|nd|rd|th)?\s*(art|artwork)\b|\[(\d+)(st|nd|rd|th)?\]|\((\d+)(st|nd|rd|th)?\)'
+                if re.search(art_pattern, title_lower):
+                    score -= 50
+                    logger.debug(f"  -50 art variant penalty: {score}")
+            
+            logger.debug(f"Final score for '{title}': {score}")
             
             candidates.append({
                 'title': title,
