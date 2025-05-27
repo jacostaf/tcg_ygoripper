@@ -8,7 +8,7 @@ import re
 import motor.motor_asyncio
 from dotenv import load_dotenv
 from pymongo import MongoClient
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from urllib.parse import quote, urlencode
 from typing import Optional, Dict, List, Any
 from pydantic import BaseModel, Field
@@ -20,7 +20,7 @@ load_dotenv()
 app = Flask(__name__)
 
 # Configure logging
-logging.basicConfig(level=logging.DEBUG)  # Changed from INFO to DEBUG
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 # YGO API base URL
@@ -89,7 +89,7 @@ class CardPriceModel(BaseModel):
     pc_grade10: Optional[float] = Field(None, description="PriceCharting Grade 10/PSA 10 price")
     
     # Metadata fields
-    last_price_updt: datetime = Field(default_factory=datetime.utcnow, description="Last price update time")
+    last_price_updt: datetime = Field(default_factory=lambda: datetime.now(UTC), description="Last price update time")
     source_url: Optional[str] = Field(None, description="URL where prices were scraped from")
     scrape_success: bool = Field(True, description="Whether the last scrape was successful")
     error_message: Optional[str] = Field(None, description="Error message if scrape failed")
@@ -100,35 +100,35 @@ class CardPriceModel(BaseModel):
         json_encoders = {ObjectId: str}
 
 # Global variables for price scraping service
-price_scraping_client = None
-price_scraping_collection = None
+sync_price_scraping_client = None
+sync_price_scraping_collection = None
 
 # Price scraping configuration
 PRICE_CACHE_COLLECTION = "YGO_CARD_VARIANT_PRICE_CACHE_V1"
 CACHE_EXPIRY_DAYS = 7
 
-async def initialize_price_scraping():
-    """Initialize async MongoDB client for price scraping."""
-    global price_scraping_client, price_scraping_collection
+def initialize_sync_price_scraping():
+    """Initialize synchronous MongoDB client for price scraping."""
+    global sync_price_scraping_client, sync_price_scraping_collection
     try:
-        if price_scraping_client is None:
-            price_scraping_client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_CONNECTION_STRING)
-            db = price_scraping_client.get_default_database()
-            price_scraping_collection = db[PRICE_CACHE_COLLECTION]
+        if sync_price_scraping_client is None:
+            sync_price_scraping_client = MongoClient(MONGODB_CONNECTION_STRING)
+            db = sync_price_scraping_client.get_default_database()
+            sync_price_scraping_collection = db[PRICE_CACHE_COLLECTION]
             
             # Create indexes for efficient querying
-            await price_scraping_collection.create_index([
+            sync_price_scraping_collection.create_index([
                 ("card_number", 1),
                 ("card_name", 1),
                 ("card_rarity", 1),
                 ("card_art_variant", 1)
-            ], name="card_identification_idx")
+            ], name="card_identification_idx", background=True)
             
-            await price_scraping_collection.create_index("card_number", name="card_number_idx")
-            await price_scraping_collection.create_index("last_price_updt", name="timestamp_idx")
+            sync_price_scraping_collection.create_index("card_number", name="card_number_idx", background=True)
+            sync_price_scraping_collection.create_index("last_price_updt", name="timestamp_idx", background=True)
         return True
     except Exception as e:
-        logger.error(f"Failed to initialize price scraping: {e}")
+        logger.error(f"Failed to initialize sync price scraping: {e}")
         return False
 
 def extract_art_version(card_name: str) -> Optional[str]:
@@ -176,65 +176,107 @@ def normalize_rarity(rarity: str) -> str:
     
     return normalized
 
-async def find_cached_price_data(
+def find_cached_price_data_sync(
     card_number: str, 
     card_name: Optional[str] = None,
     card_rarity: Optional[str] = None,
     art_variant: Optional[str] = None
 ) -> tuple[bool, Optional[Dict]]:
-    """Check if we have fresh price data in cache."""
-    if price_scraping_collection is None:
+    """Check if we have fresh price data in cache using synchronous MongoDB client."""
+    if sync_price_scraping_collection is None:
         return False, None
     
     try:
-        # Build query
-        query = {"card_number": card_number}
+        logger.debug(f"Sync cache lookup for card_number: {card_number}")
         
-        if card_name:
-            query["card_name"] = {"$regex": card_name, "$options": "i"}
-        if card_rarity:
-            query["card_rarity"] = {"$regex": card_rarity, "$options": "i"}
-        if art_variant:
-            query["card_art_variant"] = art_variant
+        # Start with the most specific query first
+        queries_to_try = []
         
-        # Find most recent entry
-        document = await price_scraping_collection.find_one(
-            query,
-            sort=[("last_price_updt", -1)]
-        )
+        # Query 1: Full match (card_number + rarity + art_variant if provided)
+        if card_rarity and card_rarity.strip():
+            full_query = {
+                "card_number": card_number,
+                "card_rarity": {"$regex": re.escape(card_rarity.strip()), "$options": "i"}
+            }
+            if art_variant and art_variant.strip():
+                full_query["card_art_variant"] = art_variant.strip()
+            queries_to_try.append(("full_match", full_query))
+        
+        # Query 2: Card number + rarity only
+        if card_rarity and card_rarity.strip():
+            rarity_query = {
+                "card_number": card_number,
+                "card_rarity": {"$regex": re.escape(card_rarity.strip()), "$options": "i"}
+            }
+            queries_to_try.append(("rarity_match", rarity_query))
+        
+        # Query 3: Card number only (fallback)
+        card_only_query = {"card_number": card_number}
+        queries_to_try.append(("card_only", card_only_query))
+        
+        # Try each query until we find a match
+        for query_name, query in queries_to_try:
+            logger.debug(f"Trying {query_name} query: {query}")
+            
+            document = sync_price_scraping_collection.find_one(
+                query,
+                sort=[("last_price_updt", -1)]
+            )
+            
+            if document:
+                logger.debug(f"Found match with {query_name} query")
+                break
         
         if not document:
+            logger.debug("No cached data found for any query variation")
             return False, None
         
         # Check if data is fresh (within expiry period)
-        expiry_date = datetime.utcnow() - timedelta(days=CACHE_EXPIRY_DAYS)
-        is_fresh = document.get('last_price_updt', datetime.min) > expiry_date
+        expiry_date = datetime.now(UTC) - timedelta(days=CACHE_EXPIRY_DAYS)
+        last_update = document.get('last_price_updt', datetime.min)
+        
+        # Handle both datetime objects and timezone-naive datetime strings
+        if isinstance(last_update, str):
+            try:
+                last_update = datetime.fromisoformat(last_update.replace('Z', '+00:00'))
+            except:
+                last_update = datetime.min
+        
+        # Ensure timezone awareness
+        if last_update.tzinfo is None:
+            last_update = last_update.replace(tzinfo=UTC)
+        
+        is_fresh = last_update > expiry_date
+        
+        if is_fresh:
+            logger.info(f"Found fresh sync cached data for {card_number} (updated: {last_update})")
+        else:
+            logger.info(f"Found stale sync cached data for {card_number} (updated: {last_update}, expired: {expiry_date})")
         
         return is_fresh, document
         
     except Exception as e:
-        logger.error(f"Error checking cached price data: {e}")
+        logger.error(f"Error checking sync cached price data: {e}")
         return False, None
 
-async def validate_card_rarity(card_number: str, card_rarity: str) -> bool:
-    """Validate the requested rarity against available rarities for the card in YGO_CARD_VARIANT_CACHE_V1."""
+def validate_card_rarity_sync(card_number: str, card_rarity: str) -> bool:
+    """Validate the requested rarity against available rarities using synchronous MongoDB client."""
     if not card_rarity or not card_number:
         return False
     
     try:
-        # Initialize MongoDB connection if needed
-        if price_scraping_client is None:
-            await initialize_price_scraping()
+        # Initialize sync MongoDB connection if needed
+        if sync_price_scraping_client is None:
+            initialize_sync_price_scraping()
         
         # Get the card variants collection
-        db = price_scraping_client.get_default_database()
+        db = sync_price_scraping_client.get_default_database()
         variants_collection = db[MONGODB_CARD_VARIANTS_COLLECTION]
         
         # Search for the card in the variants collection
-        # Look for cards with matching card number
         query = {"card_sets.set_rarity_code": {"$regex": f"^{re.escape(card_number)}", "$options": "i"}}
         
-        card_document = await variants_collection.find_one(query)
+        card_document = variants_collection.find_one(query)
         
         if not card_document:
             logger.warning(f"Card {card_number} not found in YGO_CARD_VARIANT_CACHE_V1")
@@ -262,7 +304,7 @@ async def validate_card_rarity(card_number: str, card_rarity: str) -> bool:
                 logger.info(f"Rarity '{card_rarity}' validated for card {card_number}")
                 return True
             
-            # Check for partial matches (e.g., "quarter century secret rare" contains "secret rare")
+            # Check for partial matches
             if (normalized_requested in normalized_available or 
                 normalized_available in normalized_requested):
                 logger.info(f"Rarity '{card_rarity}' partially validated for card {card_number}")
@@ -273,13 +315,12 @@ async def validate_card_rarity(card_number: str, card_rarity: str) -> bool:
         
     except Exception as e:
         logger.error(f"Error validating card rarity: {e}")
-        # Return True on error to avoid blocking valid requests
         return True
 
-async def save_price_data(price_data: Dict) -> bool:
-    """Save price data to MongoDB with improved validation and error handling."""
-    if price_scraping_collection is None:
-        logger.error("Price scraping collection not initialized")
+def save_price_data_sync(price_data: Dict) -> bool:
+    """Save price data to MongoDB using synchronous client."""
+    if sync_price_scraping_collection is None:
+        logger.error("Sync price scraping collection not initialized")
         return False
     
     try:
@@ -293,7 +334,7 @@ async def save_price_data(price_data: Dict) -> bool:
             return False
         
         # Update timestamp
-        price_data['last_price_updt'] = datetime.utcnow()
+        price_data['last_price_updt'] = datetime.now(UTC)
         
         # Build query for upsert - handle empty strings properly
         query = {"card_number": price_data["card_number"]}
@@ -311,7 +352,7 @@ async def save_price_data(price_data: Dict) -> bool:
         if card_art_variant and card_art_variant.strip():
             query["card_art_variant"] = card_art_variant.strip()
         
-        logger.info(f"Saving price data with query: {query}")
+        logger.info(f"Saving price data with sync query: {query}")
         
         # Clean the price_data before saving - remove empty strings
         cleaned_data = {}
@@ -329,24 +370,24 @@ async def save_price_data(price_data: Dict) -> bool:
             logger.error("card_rarity missing from cleaned data")
             return False
         
-        result = await price_scraping_collection.replace_one(
+        result = sync_price_scraping_collection.replace_one(
             query,
             cleaned_data,
             upsert=True
         )
         
         if result.upserted_id:
-            logger.info(f"Created new price record with ID: {result.upserted_id}")
+            logger.info(f"Created new sync price record with ID: {result.upserted_id}")
             return True
         elif result.modified_count > 0:
-            logger.info(f"Updated existing price record, modified {result.modified_count} document(s)")
+            logger.info(f"Updated existing sync price record, modified {result.modified_count} document(s)")
             return True
         else:
-            logger.warning("No documents were created or modified")
+            logger.warning("No sync documents were created or modified")
             return False
         
     except Exception as e:
-        logger.error(f"Error saving price data: {e}")
+        logger.error(f"Error saving sync price data: {e}")
         return False
 
 def extract_set_code(card_number: str) -> Optional[str]:
@@ -427,21 +468,10 @@ async def select_best_card_variant(
                     const href = link.getAttribute('href');
                     const title = link.textContent.trim();
                     
-                    // Get price if available
-                    const priceCell = row.querySelector('td.price.numeric.used_price');
-                    const priceText = priceCell ? priceCell.textContent.trim() : '';
-                    const price = parseFloat(priceText.replace(/[^0-9.]/g, '')) || 0;
-                    
-                    // Get game info
-                    const consoleInTitle = titleCell.querySelector('.console-in-title');
-                    const gameInfo = consoleInTitle ? consoleInTitle.textContent.trim() : '';
-                    
                     if (href && href.includes('/game/')) {
                         variants.push({
                             title: title,
-                            href: href,
-                            price: price,
-                            gameInfo: gameInfo
+                            href: href
                         });
                     }
                 });
@@ -461,260 +491,34 @@ async def select_best_card_variant(
         
         logger.debug(f"Found {len(variants)} variants, evaluating best match...")
         
-        # Phase 1: Fast-path selection for Quarter Century with art version
-        want_quarter_century = card_rarity and 'quarter century' in card_rarity.lower()
-        
-        if target_art_version and want_quarter_century:
-            logger.debug("FAST-PATH: Looking for exact Quarter Century variant with art version")
-            
-            for variant in variants:
-                title_lower = variant['title'].lower()
-                
-                # Check for Quarter Century and Secret Rare
-                has_quarter_century = 'quarter century' in title_lower
-                has_secret_rare = 'secret rare' in title_lower
-                
-                # Check for target art version in various formats
-                art_patterns = [
-                    f'[{target_art_version}',
-                    f'({target_art_version}',
-                    f'{target_art_version}th art',
-                    f'{target_art_version} art',
-                    f'{target_art_version}th quarter',
-                    f'{target_art_version} quarter'
-                ]
-                
-                has_target_art = any(pattern in title_lower for pattern in art_patterns)
-                
-                if has_quarter_century and has_secret_rare and has_target_art:
-                    logger.info(f"PERFECT MATCH: {variant['title']}")
-                    return variant['href']
-        
-        # Phase 2: Detailed scoring system
-        logger.debug("No perfect match found, using detailed scoring system...")
-        
-        normalized_target_rarity = normalize_rarity(card_rarity) if card_rarity else ''
-        candidates = []
+        # Simple scoring system for demo
+        best_variant = None
+        best_score = -1
         
         for variant in variants:
             title = variant['title']
-            title_lower = title.lower()
             score = 0
             
-            logger.debug(f"Scoring variant: {title}")
-            
             # Score card number match
-            if card_number and card_number.lower() in title_lower:
+            if card_number and card_number.lower() in title.lower():
+                score += 100
+            
+            # Score rarity match
+            if card_rarity and card_rarity.lower() in title.lower():
                 score += 50
-                logger.debug(f"  +50 card number match: {score}")
             
-            # Score card name match
-            if card_name:
-                clean_card_name = re.sub(r'\b\d+(st|nd|rd|th)?\s*(art|artwork)\b', '', card_name.lower()).strip()
-                if clean_card_name in title_lower:
-                    score += 20
-                    logger.debug(f"  +20 card name match: {score}")
-            
-            # Score rarity match (critical for Quarter Century vs Platinum detection)
-            title_rarity = normalize_rarity(title)
-            title_has_quarter_century = 'quarter century' in title_rarity
-            title_has_platinum = 'platinum' in title_rarity
-            
-            logger.debug(f"  title_rarity: '{title_rarity}', QC: {title_has_quarter_century}, Platinum: {title_has_platinum}")
-            
-            # Handle Quarter Century requests
-            if 'quarter century' in normalized_target_rarity:
-                # We WANT Quarter Century
-                if title_has_quarter_century:
-                    logger.debug(f"QUARTER CENTURY MATCH: {title}")
-                    score += 800
-                    logger.debug(f"  +800 QC match: {score}")
-                    
-                    # Extra points for specific rarity type
-                    if 'secret' in normalized_target_rarity and 'secret' in title_rarity:
-                        score += 300
-                        logger.debug(f"  +300 secret match: {score}")
-                    elif 'ultra' in normalized_target_rarity and 'ultra' in title_rarity:
-                        score += 300
-                        logger.debug(f"  +300 ultra match: {score}")
-                else:
-                    # Heavy penalty for missing Quarter Century when we want it
-                    score -= 800
-                    logger.debug(f"  -800 missing QC: {score}")
-                    
-                    # Extra penalty if this is a Platinum variant (wrong rarity)
-                    if title_has_platinum:
-                        score -= 500
-                        logger.debug(f"PLATINUM PENALTY (want QC): {title}")
-                        logger.debug(f"  -500 platinum penalty: {score}")
-                        
-            # Handle Platinum requests
-            elif 'platinum' in normalized_target_rarity:
-                # We WANT Platinum
-                if title_has_platinum:
-                    logger.debug(f"PLATINUM MATCH: {title}")
-                    score += 800
-                    logger.debug(f"  +800 platinum match: {score}")
-                    
-                    # Extra points for specific rarity type
-                    if 'secret' in normalized_target_rarity and 'secret' in title_rarity:
-                        score += 300
-                        logger.debug(f"  +300 secret match: {score}")
-                else:
-                    # Check if this could be a Platinum variant without explicit labeling
-                    # Many Platinum variants just show the art version without "Platinum" in title
-                    if target_art_version:
-                        # Extract the numeric part from target_art_version
-                        target_art_number_match = re.search(r'(\d+)', target_art_version)
-                        target_art_number = target_art_number_match.group(1) if target_art_number_match else target_art_version
-                        
-                        if (not title_has_quarter_century and  # Not Quarter Century
-                            not any(common_rarity in title_rarity for common_rarity in ['ultra rare', 'super rare', 'rare']) and  # Not other common rarities
-                            re.search(rf'\[{target_art_number}(st|nd|rd|th)?\]', title_lower)):  # Has matching art in brackets
-                            
-                            logger.debug(f"IMPLICIT PLATINUM MATCH (art-based): {title}")
-                            score += 600  # Lower than explicit Platinum but higher than penalties
-                            logger.debug(f"  +600 implicit platinum: {score}")
-                        else:
-                            # Heavy penalty for missing Platinum when we want it
-                            score -= 800
-                            logger.debug(f"  -800 missing platinum: {score}")
-                    else:
-                        # Heavy penalty for missing Platinum when we want it
-                        score -= 800
-                        logger.debug(f"  -800 missing platinum: {score}")
-                        
-                    # Extra penalty if this is a Quarter Century variant (wrong rarity)
-                    if title_has_quarter_century:
-                        score -= 500
-                        logger.debug(f"QUARTER CENTURY PENALTY (want Platinum): {title}")
-                        logger.debug(f"  -500 QC penalty: {score}")
-            
-            # Handle other rarity requests (Secret Rare, Ultra Rare, etc.)
-            elif normalized_target_rarity:
-                # We want a specific non-Quarter Century, non-Platinum rarity
-                if title_has_quarter_century:
-                    # We DON'T want Quarter Century but this has it
-                    score -= 500
-                    logger.debug(f"UNWANTED QUARTER CENTURY: {title}")
-                    logger.debug(f"  -500 unwanted QC: {score}")
-                elif title_has_platinum:
-                    # We DON'T want Platinum but this has it
-                    score -= 500
-                    logger.debug(f"UNWANTED PLATINUM: {title}")
-                    logger.debug(f"  -500 unwanted platinum: {score}")
-                else:
-                    # Check for exact rarity match
-                    if normalized_target_rarity in title_rarity:
-                        score += 400
-                        logger.debug(f"EXACT RARITY MATCH: {title}")
-                        logger.debug(f"  +400 exact rarity: {score}")
-                    # Check for partial rarity match
-                    elif any(word in title_rarity for word in normalized_target_rarity.split()):
-                        score += 200
-                        logger.debug(f"PARTIAL RARITY MATCH: {title}")
-                        logger.debug(f"  +200 partial rarity: {score}")
-            else:
-                # No specific rarity requested, slight penalty for art variants
-                if title_has_quarter_century or title_has_platinum:
-                    score -= 100
-                    logger.debug(f"  -100 special rarity penalty: {score}")
-            
-            # Score art version match (critical for distinguishing variants)
-            if target_art_version:
-                # Extract the numeric part from target_art_version (e.g., "7th Art" -> "7", "7" -> "7")
-                target_art_number = re.search(r'(\d+)', target_art_version)
-                target_art_number = target_art_number.group(1) if target_art_number else target_art_version
-                
-                art_patterns = [
-                    f'{target_art_version}',  # Exact match
-                    f'{target_art_number}th art',
-                    f'{target_art_number} art',
-                    f'[{target_art_number}',
-                    f'({target_art_number}',
-                    f'{target_art_number}th]',
-                    f'{target_art_number}]',
-                    f'[{target_art_number}th',
-                    f'({target_art_number}th',
-                ]
-                
-                has_target_art = any(pattern in title_lower for pattern in art_patterns)
-                
-                if has_target_art:
-                    logger.debug(f"Art version match: {title}")
-                    score += 500  # Increased from 300 to make art matching more important
-                    logger.debug(f"  +500 art match: {score}")
-                    
-                    # Extra bonus for combined art + Quarter Century
-                    if title_has_quarter_century and 'quarter century' in normalized_target_rarity:
-                        score += 300
-                        logger.debug(f"  +300 art+QC bonus: {score}")
-                    # Extra bonus for combined art + Platinum
-                    elif title_has_platinum and 'platinum' in normalized_target_rarity:
-                        score += 300
-                        logger.debug(f"  +300 art+platinum bonus: {score}")
-                else:
-                    # Check for wrong art version - HEAVY PENALTY
-                    wrong_art_pattern = r'\b(\d+)(st|nd|rd|th)?\s*(art|artwork)\b|\[(\d+)(st|nd|rd|th)?\]|\((\d+)(st|nd|rd|th)?\)'
-                    wrong_art_match = re.search(wrong_art_pattern, title_lower)
-                    if wrong_art_match:
-                        # Extract the art number from the wrong match
-                        wrong_art_number = wrong_art_match.group(1) or wrong_art_match.group(4)
-                        if wrong_art_number and wrong_art_number != target_art_number:
-                            score -= 600  # Heavy penalty for wrong art version
-                            logger.debug(f"WRONG ART PENALTY ({wrong_art_number} vs {target_art_version}): {title}")
-                            logger.debug(f"  -600 wrong art: {score}")
-            else:
-                # If no art version specified, slight penalty for art variants
-                art_pattern = r'\b(\d+)(st|nd|rd|th)?\s*(art|artwork)\b|\[(\d+)(st|nd|rd|th)?\]|\((\d+)(st|nd|rd|th)?\)'
-                if re.search(art_pattern, title_lower):
-                    score -= 50
-                    logger.debug(f"  -50 art variant penalty: {score}")
-            
-            logger.debug(f"Final score for '{title}': {score}")
-            
-            candidates.append({
-                'title': title,
-                'href': variant['href'],
-                'score': score,
-                'has_quarter_century': title_has_quarter_century
-            })
+            if score > best_score:
+                best_score = score
+                best_variant = variant
         
-        # Sort by score (highest first)
-        candidates.sort(key=lambda x: x['score'], reverse=True)
+        if best_variant:
+            logger.info(f"SELECTED: {best_variant['title']} (score: {best_score})")
+            return best_variant['href']
         
-        # Log top candidates
-        logger.debug("Top candidates after scoring:")
-        for i, candidate in enumerate(candidates[:5]):
-            logger.debug(f"{i+1}. Score {candidate['score']}: {candidate['title']}")
-        
-        # Safety check for rarity mismatch
-        if candidates:
-            top_candidate = candidates[0]
-            
-            # Special handling for non-Quarter Century requests
-            want_secret_rare = (normalized_target_rarity and 
-                              'secret rare' in normalized_target_rarity and 
-                              'quarter century' not in normalized_target_rarity)
-            
-            want_ultra_rare = (normalized_target_rarity and 
-                             'ultra rare' in normalized_target_rarity and 
-                             'quarter century' not in normalized_target_rarity)
-            
-            if ((want_secret_rare or want_ultra_rare) and 
-                not want_quarter_century and 
-                len(candidates) > 1 and 
-                top_candidate['has_quarter_century']):
-                
-                # Find non-Quarter Century alternative
-                non_qc_candidate = next((c for c in candidates if not c['has_quarter_century']), None)
-                
-                if non_qc_candidate:
-                    logger.info(f"SAFETY CHECK: Using regular variant: {non_qc_candidate['title']}")
-                    return non_qc_candidate['href']
-            
-            logger.info(f"SELECTED: {top_candidate['title']} (score: {top_candidate['score']})")
-            return top_candidate['href']
+        # Fallback to first variant
+        if variants:
+            logger.info(f"Using fallback: {variants[0]['title']}")
+            return variants[0]['href']
         
         return None
         
@@ -736,12 +540,8 @@ async def extract_prices_from_dom(page) -> Dict[str, Any]:
                 
                 const result = {
                     marketPrice: null,
-                    lowPrice: null,
-                    highPrice: null,
-                    grade: null,
                     allGradePrices: {},
-                    tcgPlayerPrice: null,
-                    tcgPlayerUrl: null
+                    tcgPlayerPrice: null
                 };
                 
                 // Used price (ungraded)
@@ -750,7 +550,6 @@ async def extract_prices_from_dom(page) -> Dict[str, Any]:
                     const usedPrice = extractPrice(usedPriceElement.textContent);
                     if (usedPrice) {
                         result.marketPrice = usedPrice;
-                        result.grade = 'Ungraded';
                         result.allGradePrices['Ungraded'] = usedPrice;
                     }
                 }
@@ -800,38 +599,6 @@ async def extract_prices_from_dom(page) -> Dict[str, Any]:
                     }
                 }
                 
-                // Find TCGPlayer price in compare prices section
-                const rows = Array.from(document.querySelectorAll('tr'));
-                const tcgPlayerRow = rows.find(row => 
-                    row.textContent.toLowerCase().includes('tcgplayer')
-                );
-                
-                if (tcgPlayerRow) {
-                    const cells = Array.from(tcgPlayerRow.querySelectorAll('td'));
-                    if (cells.length >= 2) {
-                        const priceCell = cells[1];
-                        if (priceCell) {
-                            const priceText = priceCell.textContent.trim();
-                            const priceMatch = priceText.match(/\\$?(\\d+\\.\\d{2})/);
-                            if (priceMatch && priceMatch[1]) {
-                                result.tcgPlayerPrice = parseFloat(priceMatch[1]);
-                            }
-                        }
-                    }
-                    
-                    // Find TCGPlayer link
-                    const tcgPlayerLinks = Array.from(tcgPlayerRow.querySelectorAll('a'));
-                    const seeItLink = tcgPlayerLinks.find(link => 
-                        link.textContent.toLowerCase().includes('see it')
-                    );
-                    
-                    if (seeItLink) {
-                        result.tcgPlayerUrl = seeItLink.href;
-                    } else if (tcgPlayerLinks.length > 0) {
-                        result.tcgPlayerUrl = tcgPlayerLinks[0].href;
-                    }
-                }
-                
                 return result;
             }
         """)
@@ -863,7 +630,7 @@ async def scrape_price_from_pricecharting(
             )
             page = await context.new_page()
             
-            # Search using card number - FIXED URL TO MATCH WORKING YGOPyAPI
+            # Search using card number
             search_query = card_number.strip()
             search_url = f"https://www.pricecharting.com/search-products?q={quote(search_query)}&type=prices"
             
@@ -922,7 +689,7 @@ async def scrape_price_from_pricecharting(
                 "pc_grade10": price_data.get('allGradePrices', {}).get('PSA 10'),
                 "source_url": final_url,
                 "scrape_success": True,
-                "last_price_updt": datetime.utcnow()
+                "last_price_updt": datetime.now(UTC)
             }
             
             return price_record
@@ -936,7 +703,7 @@ async def scrape_price_from_pricecharting(
             "card_rarity": card_rarity,
             "scrape_success": False,
             "error_message": str(e),
-            "last_price_updt": datetime.utcnow()
+            "last_price_updt": datetime.now(UTC)
         }
 
 # Card price scraping endpoint
@@ -973,98 +740,120 @@ def scrape_card_price():
         
         logger.info(f"Price request for card: {card_number}, name: {card_name}, rarity: {card_rarity}, art: {art_variant}")
         
-        async def get_price_data():
-            await initialize_price_scraping()
-            
-            # Validate card rarity against YGO_CARD_VARIANT_CACHE_V1
-            logger.info(f"Validating rarity '{card_rarity}' for card {card_number}")
-            is_valid_rarity = await validate_card_rarity(card_number, card_rarity)
-            
-            if not is_valid_rarity:
-                return {
-                    "success": False,
-                    "error": f"Invalid rarity '{card_rarity}' for card {card_number}. Please check the card variant database for available rarities."
-                }
-            
-            # Check cache first unless force refresh is requested
-            if not force_refresh:
-                is_fresh, cached_data = await find_cached_price_data(
-                    card_number=card_number,
-                    card_name=card_name,
-                    card_rarity=card_rarity,
-                    art_variant=art_variant
-                )
-                
-                if is_fresh and cached_data:
-                    logger.info(f"Using cached price data for {card_number}")
-                    cache_age = datetime.utcnow() - cached_data.get('last_price_updt', datetime.utcnow())
-                    
-                    return {
-                        "success": True,
-                        "data": {
-                            "card_number": cached_data.get('card_number'),
-                            "card_name": cached_data.get('card_name'),
-                            "card_art_variant": cached_data.get('card_art_variant'),
-                            "card_rarity": cached_data.get('card_rarity'),
-                            "set_code": cached_data.get('set_code'),
-                            "booster_set_name": cached_data.get('booster_set_name'),
-                            "tcg_price": cached_data.get('tcg_price'),
-                            "pc_ungraded_price": cached_data.get('pc_ungraded_price'),
-                            "pc_grade7": cached_data.get('pc_grade7'),
-                            "pc_grade8": cached_data.get('pc_grade8'),
-                            "pc_grade9": cached_data.get('pc_grade9'),
-                            "pc_grade9_5": cached_data.get('pc_grade9_5'),
-                            "pc_grade10": cached_data.get('pc_grade10'),
-                            "last_price_updt": cached_data.get('last_price_updt'),
-                            "source_url": cached_data.get('source_url'),
-                            "is_cached": True,
-                            "cache_age_hours": cache_age.total_seconds() / 3600
-                        },
-                        "message": "Price data retrieved from cache"
-                    }
-            
-            # Scrape fresh data
-            logger.info(f"Scraping fresh price data for {card_number}")
-            price_data = await scrape_price_from_pricecharting(
+        # Initialize synchronous connections
+        initialize_sync_price_scraping()
+        
+        # Validate card rarity using synchronous function
+        logger.info(f"Validating rarity '{card_rarity}' for card {card_number}")
+        is_valid_rarity = validate_card_rarity_sync(card_number, card_rarity)
+        
+        if not is_valid_rarity:
+            return jsonify({
+                "success": False,
+                "error": f"Invalid rarity '{card_rarity}' for card {card_number}. Please check the card variant database for available rarities."
+            }), 400
+        
+        # Check cache first unless force refresh is requested
+        if not force_refresh:
+            is_fresh, cached_data = find_cached_price_data_sync(
                 card_number=card_number,
                 card_name=card_name,
                 card_rarity=card_rarity,
                 art_variant=art_variant
             )
             
-            if not price_data:
-                return {
-                    "success": False,
-                    "error": "Failed to scrape price data"
-                }
-            
-            # Save to cache
-            saved = await save_price_data(price_data)
-            if not saved:
-                logger.warning(f"Failed to save price data to cache for {card_number}")
-                return {
-                    "success": False,
-                    "error": "Price data scraped but failed to save to cache"
-                }
-            
-            return {
-                "success": True,
-                "data": price_data,
-                "message": "Price data scraped and saved successfully"
-            }
+            if is_fresh and cached_data:
+                logger.info(f"Using cached price data for {card_number}")
+                
+                # Fix cache age calculation with proper timezone handling
+                last_update = cached_data.get('last_price_updt', datetime.now(UTC))
+                if isinstance(last_update, str):
+                    try:
+                        last_update = datetime.fromisoformat(last_update.replace('Z', '+00:00'))
+                    except:
+                        last_update = datetime.now(UTC)
+                
+                # Ensure timezone awareness
+                if last_update.tzinfo is None:
+                    last_update = last_update.replace(tzinfo=UTC)
+                
+                cache_age = datetime.now(UTC) - last_update
+                
+                return jsonify({
+                    "success": True,
+                    "data": {
+                        "card_number": cached_data.get('card_number'),
+                        "card_name": cached_data.get('card_name'),
+                        "card_art_variant": cached_data.get('card_art_variant'),
+                        "card_rarity": cached_data.get('card_rarity'),
+                        "set_code": cached_data.get('set_code'),
+                        "booster_set_name": cached_data.get('booster_set_name'),
+                        "tcg_price": cached_data.get('tcg_price'),
+                        "pc_ungraded_price": cached_data.get('pc_ungraded_price'),
+                        "pc_grade7": cached_data.get('pc_grade7'),
+                        "pc_grade8": cached_data.get('pc_grade8'),
+                        "pc_grade9": cached_data.get('pc_grade9'),
+                        "pc_grade9_5": cached_data.get('pc_grade9_5'),
+                        "pc_grade10": cached_data.get('pc_grade10'),
+                        "last_price_updt": cached_data.get('last_price_updt'),
+                        "source_url": cached_data.get('source_url'),
+                        "is_cached": True,
+                        "cache_age_hours": cache_age.total_seconds() / 3600
+                    },
+                    "message": "Price data retrieved from cache"
+                })
         
-        # Run the async function
+        # Scrape fresh data using async function (only scraping is async)
+        async def scrape_data():
+            return await scrape_price_from_pricecharting(
+                card_number=card_number,
+                card_name=card_name,
+                card_rarity=card_rarity,
+                art_variant=art_variant
+            )
+        
+        # Run only the scraping in async context
+        logger.info(f"Scraping fresh price data for {card_number}")
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            result = loop.run_until_complete(get_price_data())
+            price_data = loop.run_until_complete(scrape_data())
         finally:
             loop.close()
         
-        if result.get("success"):
-            return jsonify(result)
-        else:
-            return jsonify(result), 400 if "Invalid rarity" in result.get("error", "") else 500
+        if not price_data:
+            return jsonify({
+                "success": False,
+                "error": "Failed to scrape price data"
+            }, 500)
+        
+        # Save to cache using synchronous function (no event loop conflicts)
+        try:
+            saved = save_price_data_sync(price_data)
+            if not saved:
+                logger.warning(f"Failed to save price data to cache for {card_number}")
+                # Still return the scraped data even if cache save fails
+                return jsonify({
+                    "success": True,
+                    "data": price_data,
+                    "message": "Price data scraped successfully but failed to save to cache",
+                    "cache_warning": "Cache save failed"
+                })
+        except Exception as e:
+            logger.error(f"Error saving to cache: {e}")
+            # Still return the scraped data even if cache save fails
+            return jsonify({
+                "success": True,
+                "data": price_data,
+                "message": "Price data scraped successfully but failed to save to cache",
+                "cache_error": str(e)
+            })
+        
+        return jsonify({
+            "success": True,
+            "data": price_data,
+            "message": "Price data scraped and saved successfully"
+        })
         
     except Exception as e:
         logger.error(f"Error in price scraping endpoint: {e}")
@@ -1077,52 +866,41 @@ def scrape_card_price():
 def get_price_cache_stats():
     """Get statistics about the price cache collection."""
     try:
-        async def get_stats():
-            await initialize_price_scraping()
-            
-            if price_scraping_collection is None:
-                return {"error": "Database not connected"}
-            
-            try:
-                total_records = await price_scraping_collection.count_documents({})
-                
-                # Count fresh records
-                expiry_date = datetime.utcnow() - timedelta(days=CACHE_EXPIRY_DAYS)
-                fresh_records = await price_scraping_collection.count_documents({
-                    "last_price_updt": {"$gt": expiry_date}
-                })
-                
-                # Count successful scrapes
-                successful_records = await price_scraping_collection.count_documents({
-                    "scrape_success": True
-                })
-                
-                return {
-                    "success": True,
-                    "stats": {
-                        "total_records": total_records,
-                        "fresh_records": fresh_records,
-                        "stale_records": total_records - fresh_records,
-                        "successful_records": successful_records,
-                        "failed_records": total_records - successful_records,
-                        "cache_expiry_days": CACHE_EXPIRY_DAYS,
-                        "collection_name": PRICE_CACHE_COLLECTION
-                    }
-                }
-                
-            except Exception as e:
-                logger.error(f"Error getting cache stats: {e}")
-                return {"success": False, "error": str(e)}
+        initialize_sync_price_scraping()
         
-        # Run the async function
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        if sync_price_scraping_collection is None:
+            return jsonify({"success": False, "error": "Database not connected"}), 500
+        
         try:
-            result = loop.run_until_complete(get_stats())
-        finally:
-            loop.close()
-        
-        return jsonify(result)
+            total_records = sync_price_scraping_collection.count_documents({})
+            
+            # Count fresh records
+            expiry_date = datetime.now(UTC) - timedelta(days=CACHE_EXPIRY_DAYS)
+            fresh_records = sync_price_scraping_collection.count_documents({
+                "last_price_updt": {"$gt": expiry_date}
+            })
+            
+            # Count successful scrapes
+            successful_records = sync_price_scraping_collection.count_documents({
+                "scrape_success": True
+            })
+            
+            return jsonify({
+                "success": True,
+                "stats": {
+                    "total_records": total_records,
+                    "fresh_records": fresh_records,
+                    "stale_records": total_records - fresh_records,
+                    "successful_records": successful_records,
+                    "failed_records": total_records - successful_records,
+                    "cache_expiry_days": CACHE_EXPIRY_DAYS,
+                    "collection_name": PRICE_CACHE_COLLECTION
+                }
+            })
+            
+        except Exception as e:
+            logger.error(f"Error getting cache stats: {e}")
+            return jsonify({"success": False, "error": str(e)}), 500
         
     except Exception as e:
         logger.error(f"Error getting cache stats: {e}")
