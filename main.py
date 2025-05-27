@@ -170,6 +170,10 @@ def normalize_rarity(rarity: str) -> str:
             return 'quarter century rare'
         return 'quarter century'
     
+    # Special handling for Platinum Secret Rare
+    if 'platinum' in normalized and 'secret' in normalized:
+        return 'platinum secret rare'
+    
     return normalized
 
 async def find_cached_price_data(
@@ -405,10 +409,12 @@ async def select_best_card_variant(
                 if clean_card_name in title_lower:
                     score += 20
             
-            # Score rarity match (critical for Quarter Century detection)
+            # Score rarity match (critical for Quarter Century vs Platinum detection)
             title_rarity = normalize_rarity(title)
             title_has_quarter_century = 'quarter century' in title_rarity
+            title_has_platinum = 'platinum' in title_rarity
             
+            # Handle Quarter Century requests
             if 'quarter century' in normalized_target_rarity:
                 # We WANT Quarter Century
                 if title_has_quarter_century:
@@ -423,9 +429,55 @@ async def select_best_card_variant(
                 else:
                     # Heavy penalty for missing Quarter Century when we want it
                     score -= 800
-            elif title_has_quarter_century:
-                # We DON'T want Quarter Century but this has it
-                score -= 500
+                    
+                    # Extra penalty if this is a Platinum variant (wrong rarity)
+                    if title_has_platinum:
+                        score -= 500
+                        logger.debug(f"PLATINUM PENALTY (want QC): {title}")
+                        
+            # Handle Platinum requests
+            elif 'platinum' in normalized_target_rarity:
+                # We WANT Platinum
+                if title_has_platinum:
+                    logger.debug(f"PLATINUM MATCH: {title}")
+                    score += 800
+                    
+                    # Extra points for specific rarity type
+                    if 'secret' in normalized_target_rarity and 'secret' in title_rarity:
+                        score += 300
+                else:
+                    # Heavy penalty for missing Platinum when we want it
+                    score -= 800
+                    
+                    # Extra penalty if this is a Quarter Century variant (wrong rarity)
+                    if title_has_quarter_century:
+                        score -= 500
+                        logger.debug(f"QUARTER CENTURY PENALTY (want Platinum): {title}")
+                        
+            # Handle other rarity requests (Secret Rare, Ultra Rare, etc.)
+            elif normalized_target_rarity:
+                # We want a specific non-Quarter Century, non-Platinum rarity
+                if title_has_quarter_century:
+                    # We DON'T want Quarter Century but this has it
+                    score -= 500
+                    logger.debug(f"UNWANTED QUARTER CENTURY: {title}")
+                elif title_has_platinum:
+                    # We DON'T want Platinum but this has it
+                    score -= 500
+                    logger.debug(f"UNWANTED PLATINUM: {title}")
+                else:
+                    # Check for exact rarity match
+                    if normalized_target_rarity in title_rarity:
+                        score += 400
+                        logger.debug(f"EXACT RARITY MATCH: {title}")
+                    # Check for partial rarity match
+                    elif any(word in title_rarity for word in normalized_target_rarity.split()):
+                        score += 200
+                        logger.debug(f"PARTIAL RARITY MATCH: {title}")
+            else:
+                # No specific rarity requested, slight penalty for special rarities
+                if title_has_quarter_century or title_has_platinum:
+                    score -= 100
             
             # Score art version match
             if target_art_version:
@@ -735,7 +787,7 @@ def scrape_card_price():
             return jsonify({
                 "success": False,
                 "error": "card_number is required"
-            }), 400
+            }, 400)
         
         card_name = data.get('card_name')
         card_rarity = data.get('card_rarity')
