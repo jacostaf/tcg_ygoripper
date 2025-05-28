@@ -132,11 +132,12 @@ def initialize_sync_price_scraping():
         return False
 
 def extract_art_version(card_name: str) -> Optional[str]:
-    """Extract art version from card name using regex patterns."""
+    """Extract art version from card name using regex patterns for both numbered and named variants."""
     if not card_name:
         return None
     
-    patterns = [
+    # First, try numbered art variants
+    numbered_patterns = [
         r'\[(\d+)(st|nd|rd|th)?\s*art\]',                         # "[9th Art]", "[7th art]"
         r'\[(\d+)(st|nd|rd|th)?\s*quarter\s*century.*?\]',        # "[7th Quarter Century Secret Rare]" 
         r'\[(\d+)(st|nd|rd|th)?\s*.*?secret.*?\]',                # "[7th Platinum Secret Rare]"
@@ -148,11 +149,30 @@ def extract_art_version(card_name: str) -> Optional[str]:
         r'\-(\d+)(st|nd|rd|th)?\-(?:quarter|art)',                # "-7th-quarter", "-9th-art"
     ]
     
-    for pattern in patterns:
+    for pattern in numbered_patterns:
         match = re.search(pattern, card_name, re.IGNORECASE)
         if match:
             art_version = match.group(1)
-            logger.debug(f"Detected art version: {art_version} using pattern '{pattern}' in: {card_name}")
+            logger.debug(f"Detected numbered art version: {art_version} using pattern '{pattern}' in: {card_name}")
+            return art_version
+    
+    # Then, try named art variants (like "Arkana", "Joey Wheeler", etc.)
+    named_patterns = [
+        r'\b(arkana)\b',                                          # "arkana" (case insensitive)
+        r'\b(joey\s+wheeler)\b',                                  # "joey wheeler"
+        r'\b(kaiba)\b',                                           # "kaiba"
+        r'\b(pharaoh)\b',                                         # "pharaoh"
+        r'\b(anime)\b',                                           # "anime"
+        r'\b(manga)\b',                                           # "manga"
+        r'-([a-zA-Z]+(?:\s+[a-zA-Z]+)*)-',                       # Generic pattern for "-name-" format
+        r'\(([a-zA-Z]+(?:\s+[a-zA-Z]+)*)\)',                     # Generic pattern for "(name)" format
+    ]
+    
+    for pattern in named_patterns:
+        match = re.search(pattern, card_name, re.IGNORECASE)
+        if match:
+            art_version = match.group(1).strip().title()  # Capitalize properly
+            logger.debug(f"Detected named art version: '{art_version}' using pattern '{pattern}' in: {card_name}")
             return art_version
     
     return None
@@ -241,7 +261,14 @@ def find_cached_price_data_sync(
         # Normalize art variant for consistent matching
         normalized_art_variant = None
         if art_variant and art_variant.strip():
-            normalized_art_variant = re.sub(r'(st|nd|rd|th)$', '', art_variant.lower().strip())
+            # Handle both numbered and named art variants
+            if art_variant.isdigit() or any(suffix in art_variant.lower() for suffix in ['st', 'nd', 'rd', 'th']):
+                # Numbered art variant - remove ordinal suffixes for normalization
+                normalized_art_variant = re.sub(r'(st|nd|rd|th)$', '', art_variant.lower().strip())
+            else:
+                # Named art variant - normalize case and spacing
+                normalized_art_variant = art_variant.lower().strip()
+            
             logger.info(f"  Normalized art variant: '{art_variant}' -> '{normalized_art_variant}'")
         
         # Build precise cache queries that ENFORCE art variant matching
@@ -253,24 +280,53 @@ def find_cached_price_data_sync(
             
             # Query 1: Exact match (card_number + rarity + art_variant)
             if card_rarity and card_rarity.strip():
-                exact_query = {
+                if art_variant.isdigit() or any(suffix in art_variant.lower() for suffix in ['st', 'nd', 'rd', 'th']):
+                    # Numbered art variant - use regex for flexible matching
+                    exact_query = {
+                        "card_number": card_number,
+                        "card_rarity": {"$regex": re.escape(card_rarity.strip()), "$options": "i"},
+                        "$or": [
+                            {"card_art_variant": {"$regex": f"^{re.escape(normalized_art_variant)}(st|nd|rd|th)?$", "$options": "i"}},
+                            {"card_art_variant": art_variant.strip()}  # Also try exact match
+                        ]
+                    }
+                else:
+                    # Named art variant - use case-insensitive matching
+                    exact_query = {
+                        "card_number": card_number,
+                        "card_rarity": {"$regex": re.escape(card_rarity.strip()), "$options": "i"},
+                        "$or": [
+                            {"card_art_variant": {"$regex": f"^{re.escape(normalized_art_variant)}$", "$options": "i"}},
+                            {"card_art_variant": art_variant.strip()},  # Exact match
+                            # Also search in card name and URL for named variants
+                            {"card_name": {"$regex": re.escape(art_variant.strip()), "$options": "i"}},
+                            {"source_url": {"$regex": re.escape(art_variant.strip().lower()), "$options": "i"}}
+                        ]
+                    }
+                queries_to_try.append(("art_rarity_exact", exact_query))
+            
+            # Query 2: Card number + art variant only (fallback if rarity doesn't match)
+            if art_variant.isdigit() or any(suffix in art_variant.lower() for suffix in ['st', 'nd', 'rd', 'th']):
+                # Numbered art variant
+                art_only_query = {
                     "card_number": card_number,
-                    "card_rarity": {"$regex": re.escape(card_rarity.strip()), "$options": "i"},
                     "$or": [
                         {"card_art_variant": {"$regex": f"^{re.escape(normalized_art_variant)}(st|nd|rd|th)?$", "$options": "i"}},
                         {"card_art_variant": art_variant.strip()}  # Also try exact match
                     ]
                 }
-                queries_to_try.append(("art_rarity_exact", exact_query))
-            
-            # Query 2: Card number + art variant only (fallback if rarity doesn't match)
-            art_only_query = {
-                "card_number": card_number,
-                "$or": [
-                    {"card_art_variant": {"$regex": f"^{re.escape(normalized_art_variant)}(st|nd|rd|th)?$", "$options": "i"}},
-                    {"card_art_variant": art_variant.strip()}  # Also try exact match
-                ]
-            }
+            else:
+                # Named art variant
+                art_only_query = {
+                    "card_number": card_number,
+                    "$or": [
+                        {"card_art_variant": {"$regex": f"^{re.escape(normalized_art_variant)}$", "$options": "i"}},
+                        {"card_art_variant": art_variant.strip()},
+                        # Also search in card name and URL for named variants
+                        {"card_name": {"$regex": re.escape(art_variant.strip()), "$options": "i"}},
+                        {"source_url": {"$regex": re.escape(art_variant.strip().lower()), "$options": "i"}}
+                    ]
+                }
             queries_to_try.append(("art_only", art_only_query))
         
         else:
@@ -709,18 +765,37 @@ async def select_best_card_variant(
             # Score art variant matching with higher priority when explicitly requested
             art_matched = False
             if target_art_version and detected_art:
-                target_clean = re.sub(r'(st|nd|rd|th)$', '', target_art_version.lower().strip())
-                detected_clean = re.sub(r'(st|nd|rd|th)$', '', detected_art.lower().strip())
-                
-                if target_clean == detected_clean:
-                    art_matched = True
-                    # Higher score for art match when explicitly requested
-                    score_breakdown['art'] = 300  # Increased from 150
-                    logger.info(f"  ✓ EXACT ART MATCH '{target_clean}' == '{detected_clean}': +300")
+                # Handle both numbered and named art variants
+                if target_art_version.isdigit() or any(suffix in target_art_version.lower() for suffix in ['st', 'nd', 'rd', 'th']):
+                    # Numbered art variant (e.g., "7", "7th", "1st")
+                    target_clean = re.sub(r'(st|nd|rd|th)$', '', target_art_version.lower().strip())
+                    detected_clean = re.sub(r'(st|nd|rd|th)$', '', detected_art.lower().strip())
+                    
+                    if target_clean == detected_clean:
+                        art_matched = True
+                        score_breakdown['art'] = 300
+                        logger.info(f"  ✓ EXACT NUMBERED ART MATCH '{target_clean}' == '{detected_clean}': +300")
+                    else:
+                        score_breakdown['art'] = -500
+                        logger.info(f"  ✗ NUMBERED ART MISMATCH '{target_clean}' != '{detected_clean}': -500")
                 else:
-                    # Much higher penalty for art mismatch when specific art is requested
-                    score_breakdown['art'] = -500  # Increased penalty from -200
-                    logger.info(f"  ✗ ART MISMATCH '{target_clean}' != '{detected_clean}': -500")
+                    # Named art variant (e.g., "Arkana", "Joey Wheeler")
+                    target_clean = target_art_version.lower().strip()
+                    detected_clean = detected_art.lower().strip()
+                    
+                    if target_clean == detected_clean:
+                        art_matched = True
+                        score_breakdown['art'] = 300
+                        logger.info(f"  ✓ EXACT NAMED ART MATCH '{target_art_version}' == '{detected_art}': +300")
+                    else:
+                        # For named variants, also check partial matches (in case of formatting differences)
+                        if target_clean in detected_clean or detected_clean in target_clean:
+                            art_matched = True
+                            score_breakdown['art'] = 250  # Slightly lower score for partial match
+                            logger.info(f"  ✓ PARTIAL NAMED ART MATCH '{target_art_version}' ~= '{detected_art}': +250")
+                        else:
+                            score_breakdown['art'] = -500
+                            logger.info(f"  ✗ NAMED ART MISMATCH '{target_art_version}' != '{detected_art}': -500")
             elif target_art_version and not detected_art:
                 score_breakdown['art'] = -100
                 logger.info(f"  ✗ No Art Info Found: -100")
