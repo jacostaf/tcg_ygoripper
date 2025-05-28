@@ -236,108 +236,158 @@ def find_cached_price_data_sync(
         return False, None
     
     try:
-        logger.debug(f"Sync cache lookup for card_number: {card_number}")
+        logger.info(f"🔍 CACHE LOOKUP: card_number={card_number}, rarity={card_rarity}, art_variant={art_variant}")
         
-        # Start with the most specific query first
+        # Normalize art variant for consistent matching
+        normalized_art_variant = None
+        if art_variant and art_variant.strip():
+            normalized_art_variant = re.sub(r'(st|nd|rd|th)$', '', art_variant.lower().strip())
+            logger.info(f"  Normalized art variant: '{art_variant}' -> '{normalized_art_variant}'")
+        
+        # Build precise cache queries that ENFORCE art variant matching
         queries_to_try = []
         
-        # Query 1: Full match (card_number + rarity + art_variant if provided)
-        if card_rarity and card_rarity.strip():
-            full_query = {
-                "card_number": card_number,
-                "card_rarity": {"$regex": re.escape(card_rarity.strip()), "$options": "i"}
-            }
-            if art_variant and art_variant.strip():
-                full_query["card_art_variant"] = art_variant.strip()
-            queries_to_try.append(("full_match", full_query))
-        
-        # Query 2: Card number + rarity only
-        if card_rarity and card_rarity.strip():
-            rarity_query = {
-                "card_number": card_number,
-                "card_rarity": {"$regex": re.escape(card_rarity.strip()), "$options": "i"}
-            }
-            queries_to_try.append(("rarity_match", rarity_query))
-        
-        # Query 3: Card number only (fallback)
-        card_only_query = {"card_number": card_number}
-        queries_to_try.append(("card_only", card_only_query))
-        
-        # Try each query until we find a match
-        for query_name, query in queries_to_try:
-            logger.debug(f"Trying {query_name} query: {query}")
+        # When art variant is specified, ALL queries must include it as a requirement
+        if normalized_art_variant:
+            logger.info("  🎯 ART VARIANT SPECIFIED - Building art-specific queries only")
             
-            document = sync_price_scraping_collection.find_one(
+            # Query 1: Exact match (card_number + rarity + art_variant)
+            if card_rarity and card_rarity.strip():
+                exact_query = {
+                    "card_number": card_number,
+                    "card_rarity": {"$regex": re.escape(card_rarity.strip()), "$options": "i"},
+                    "$or": [
+                        {"card_art_variant": {"$regex": f"^{re.escape(normalized_art_variant)}(st|nd|rd|th)?$", "$options": "i"}},
+                        {"card_art_variant": art_variant.strip()}  # Also try exact match
+                    ]
+                }
+                queries_to_try.append(("art_rarity_exact", exact_query))
+            
+            # Query 2: Card number + art variant only (fallback if rarity doesn't match)
+            art_only_query = {
+                "card_number": card_number,
+                "$or": [
+                    {"card_art_variant": {"$regex": f"^{re.escape(normalized_art_variant)}(st|nd|rd|th)?$", "$options": "i"}},
+                    {"card_art_variant": art_variant.strip()}  # Also try exact match
+                ]
+            }
+            queries_to_try.append(("art_only", art_only_query))
+        
+        else:
+            logger.info("  📋 NO ART VARIANT SPECIFIED - Building general queries")
+            
+            # When no art variant specified, use the original logic
+            # Query 1: Card number + rarity (prefer entries without art variants for base cards)
+            if card_rarity and card_rarity.strip():
+                rarity_query = {
+                    "card_number": card_number,
+                    "card_rarity": {"$regex": re.escape(card_rarity.strip()), "$options": "i"},
+                    "$or": [
+                        {"card_art_variant": {"$exists": False}},  # Prefer entries without art variants
+                        {"card_art_variant": None},
+                        {"card_art_variant": ""}
+                    ]
+                }
+                queries_to_try.append(("rarity_no_art", rarity_query))
+            
+            # Query 2: Card number only (fallback)
+            card_only_query = {
+                "card_number": card_number,
+                "$or": [
+                    {"card_art_variant": {"$exists": False}},  # Prefer entries without art variants
+                    {"card_art_variant": None},
+                    {"card_art_variant": ""}
+                ]
+            }
+            queries_to_try.append(("card_only_no_art", card_only_query))
+        
+        # Try each query until we find a valid match
+        for query_name, query in queries_to_try:
+            logger.info(f"  🔎 Trying {query_name} query: {query}")
+            
+            # Find all matching documents and sort by most recent
+            documents = list(sync_price_scraping_collection.find(
                 query,
                 sort=[("last_price_updt", -1)]
-            )
+            ).limit(5))  # Get top 5 most recent matches
             
-            if document:
-                logger.debug(f"Found match with {query_name} query")
+            logger.info(f"  📊 Found {len(documents)} document(s) for {query_name}")
+            
+            for i, document in enumerate(documents):
+                logger.info(f"  🔍 Validating document {i+1}:")
+                logger.info(f"    - Stored art variant: '{document.get('card_art_variant', 'None')}'")
+                logger.info(f"    - Card name: '{document.get('card_name', '')[:60]}...'")
+                logger.info(f"    - Source URL: '{document.get('source_url', '')}'")
                 
-                # VALIDATE: Check if cached data actually matches the request
-                if art_variant and art_variant.strip():
+                # STRICT VALIDATION: Ensure the cached data matches the request
+                if normalized_art_variant:
+                    cached_art_variant = document.get('card_art_variant', '')
                     cached_card_name = document.get('card_name', '')
                     cached_source_url = document.get('source_url', '')
-                    cached_art_variant = document.get('card_art_variant', '')
                     
-                    # Extract actual art variant from cached card name and URL
+                    # Extract actual art variant from cached data
                     actual_art_from_name = extract_art_version(cached_card_name)
                     actual_art_from_url = extract_art_version(cached_source_url)
+                    stored_art_variant = cached_art_variant
                     
                     # Use the most reliable source for actual art variant
-                    actual_art_variant = actual_art_from_name or actual_art_from_url
+                    actual_art_variant = actual_art_from_name or actual_art_from_url or stored_art_variant
                     
                     if actual_art_variant:
-                        # Clean up for comparison
-                        requested_clean = re.sub(r'(st|nd|rd|th)$', '', art_variant.lower().strip())
-                        actual_clean = re.sub(r'(st|nd|rd|th)$', '', actual_art_variant.lower().strip())
-                        cached_clean = re.sub(r'(st|nd|rd|th)$', '', cached_art_variant.lower().strip())
+                        # Normalize for comparison
+                        actual_clean = re.sub(r'(st|nd|rd|th)$', '', str(actual_art_variant).lower().strip())
                         
-                        # Check if the actual art variant matches what was requested
-                        if requested_clean != actual_clean:
-                            logger.warning(f"CACHE VALIDATION FAILED: Requested '{art_variant}' but cached data is actually '{actual_art_variant}' (card name: {cached_card_name[:100]}...)")
-                            logger.warning(f"Stored art variant: '{cached_art_variant}', Actual from name: '{actual_art_from_name}', Actual from URL: '{actual_art_from_url}'")
-                            logger.warning(f"This cache entry appears to be corrupted, skipping...")
-                            continue  # Skip this corrupted cache entry
+                        if normalized_art_variant == actual_clean:
+                            logger.info(f"    ✅ ART VALIDATION PASSED: '{art_variant}' matches '{actual_art_variant}'")
+                            return _check_freshness_and_return(document)
                         else:
-                            logger.info(f"CACHE VALIDATION PASSED: Requested '{art_variant}' matches actual '{actual_art_variant}'")
+                            logger.warning(f"    ❌ ART VALIDATION FAILED: '{art_variant}' != '{actual_art_variant}'")
+                            continue  # Try next document
                     else:
-                        logger.warning(f"Could not extract actual art variant from cached data for validation")
-                
-                break
+                        logger.warning(f"    ⚠️  Could not extract art variant from cached data")
+                        continue  # Try next document
+                else:
+                    # No art variant requested - make sure cached entry doesn't have one either
+                    cached_art_variant = document.get('card_art_variant', '')
+                    if cached_art_variant and cached_art_variant.strip():
+                        logger.warning(f"    ❌ Found art variant '{cached_art_variant}' but none was requested, skipping")
+                        continue  # Skip entries with art variants when none requested
+                    else:
+                        logger.info(f"    ✅ NO ART VALIDATION: No art variant in request or cache")
+                        return _check_freshness_and_return(document)
         
-        if not document:
-            logger.debug("No valid cached data found for any query variation")
-            return False, None
-        
-        # Check if data is fresh (within expiry period)
-        expiry_date = datetime.now(UTC) - timedelta(days=CACHE_EXPIRY_DAYS)
-        last_update = document.get('last_price_updt', datetime.min)
-        
-        # Handle both datetime objects and timezone-naive datetime strings
-        if isinstance(last_update, str):
-            try:
-                last_update = datetime.fromisoformat(last_update.replace('Z', '+00:00'))
-            except:
-                last_update = datetime.min
-        
-        # Ensure timezone awareness
-        if last_update.tzinfo is None:
-            last_update = last_update.replace(tzinfo=UTC)
-        
-        is_fresh = last_update > expiry_date
-        
-        if is_fresh:
-            logger.info(f"Found fresh sync cached data for {card_number} (updated: {last_update})")
-        else:
-            logger.info(f"Found stale sync cached data for {card_number} (updated: {last_update}, expired: {expiry_date})")
-        
-        return is_fresh, document
+        logger.info("  ❌ No valid cached data found for any query")
+        return False, None
         
     except Exception as e:
         logger.error(f"Error checking sync cached price data: {e}")
         return False, None
+
+def _check_freshness_and_return(document) -> tuple[bool, Optional[Dict]]:
+    """Helper function to check cache freshness and return the result."""
+    # Check if data is fresh (within expiry period)
+    expiry_date = datetime.now(UTC) - timedelta(days=CACHE_EXPIRY_DAYS)
+    last_update = document.get('last_price_updt', datetime.min)
+    
+    # Handle both datetime objects and timezone-naive datetime strings
+    if isinstance(last_update, str):
+        try:
+            last_update = datetime.fromisoformat(last_update.replace('Z', '+00:00'))
+        except:
+            last_update = datetime.min
+    
+    # Ensure timezone awareness
+    if last_update.tzinfo is None:
+        last_update = last_update.replace(tzinfo=UTC)
+    
+    is_fresh = last_update > expiry_date
+    
+    if is_fresh:
+        logger.info(f"  ✅ Found FRESH cached data (updated: {last_update})")
+    else:
+        logger.info(f"  ⚠️  Found STALE cached data (updated: {last_update}, expired: {expiry_date})")
+    
+    return is_fresh, document
 
 def validate_card_rarity_sync(card_number: str, card_rarity: str) -> bool:
     """Validate the requested rarity against available rarities using synchronous MongoDB client."""
