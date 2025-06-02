@@ -34,20 +34,15 @@ MONGODB_CARD_VARIANTS_COLLECTION = "YGO_CARD_VARIANT_CACHE_V1"
 def get_mongo_client():
     """Get MongoDB client connection with proper SSL configuration for Render"""
     try:
-        # Create SSL context with proper configuration
-        ssl_ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = ssl.CERT_NONE
-        
-        # Connect with enhanced SSL settings
+        # Connect with simplified SSL settings
         client = MongoClient(
             MONGODB_CONNECTION_STRING,
             ssl=True,
-            ssl_cert_reqs=ssl.CERT_NONE,
             tlsAllowInvalidCertificates=True,
-            serverSelectionTimeoutMS=30000,
             connectTimeoutMS=30000,
-            retryWrites=True
+            serverSelectionTimeoutMS=30000,
+            retryWrites=True,
+            w='majority'
         )
         
         # Test the connection
@@ -56,7 +51,22 @@ def get_mongo_client():
         return client
     except Exception as e:
         logger.error(f"Failed to connect to MongoDB: {str(e)}")
-        return None
+        # Try a fallback connection approach with minimal SSL settings
+        try:
+            logger.info("Attempting fallback connection approach...")
+            client = MongoClient(
+                MONGODB_CONNECTION_STRING,
+                tls=True,
+                tlsAllowInvalidCertificates=True,
+                serverSelectionTimeoutMS=30000,
+                retryWrites=True
+            )
+            client.admin.command('ping')
+            logger.info("Successfully connected to MongoDB with fallback settings")
+            return client
+        except Exception as fallback_e:
+            logger.error(f"Fallback connection also failed: {str(fallback_e)}")
+            return None
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -124,19 +134,19 @@ PRICE_CACHE_COLLECTION = "YGO_CARD_VARIANT_PRICE_CACHE_V1"
 CACHE_EXPIRY_DAYS = 7
 
 def initialize_sync_price_scraping():
-    """Initialize synchronous MongoDB client for price scraping with enhanced SSL configuration."""
+    """Initialize synchronous MongoDB client for price scraping."""
     global sync_price_scraping_client, sync_price_scraping_collection
     try:
         if sync_price_scraping_client is None:
-            # Use the same SSL configuration as the main MongoDB client
+            # Use identical SSL configuration as the main client function
             sync_price_scraping_client = MongoClient(
                 MONGODB_CONNECTION_STRING,
                 ssl=True,
-                ssl_cert_reqs=ssl.CERT_NONE,
                 tlsAllowInvalidCertificates=True,
-                serverSelectionTimeoutMS=30000,
                 connectTimeoutMS=30000,
-                retryWrites=True
+                serverSelectionTimeoutMS=30000,
+                retryWrites=True,
+                w='majority'
             )
             
             db = sync_price_scraping_client.get_default_database()
@@ -156,7 +166,7 @@ def initialize_sync_price_scraping():
                 logger.info("Successfully created indexes for price scraping")
             except Exception as index_error:
                 logger.warning(f"Failed to create indexes (continuing anyway): {index_error}")
-            
+        
         return True
     except Exception as e:
         logger.error(f"Failed to initialize sync price scraping: {e}")
@@ -1904,7 +1914,8 @@ def get_cards_from_specific_set(set_name):
             "success": False,
             "set_name": set_name,
             "error": "Request timed out"
-        }), 504
+              
+               }), 504
         
     except Exception as e:
         logger.error(f"Error fetching cards for set {set_name}: {str(e)}")
