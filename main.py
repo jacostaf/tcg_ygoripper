@@ -1929,7 +1929,10 @@ def internal_error(error):
     }), 500
 
 if __name__ == '__main__':
-    print("Starting YGO Card Sets API...")
+    # Get port from environment variable or default to 8081
+    port = int(os.getenv("PORT", 8081))
+    
+    print(f"Starting YGO Card Sets API on port {port}...")
     print("Available endpoints:")
     print("  GET /health - Health check")
     print("  GET /card-sets - Get all card sets")
@@ -1942,4 +1945,4 @@ if __name__ == '__main__':
     print("  POST /cards/price - Scrape card prices")
     print("  GET /cards/price/cache-stats - Get price cache statistics")
     print("  POST /debug/art-extraction - Debug art variant extraction")
-    app.run(host='0.0.0.0', port=8081, debug=True)
+    app.run(host='0.0.0.0', port=port, debug=True)
