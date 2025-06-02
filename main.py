@@ -12,6 +12,7 @@ import os
 import time
 import re
 import asyncio
+import ssl
 
 # Load environment variables
 load_dotenv()
@@ -31,11 +32,27 @@ MONGODB_COLLECTION_NAME = "YGO_SETS_CACHE_V1"
 MONGODB_CARD_VARIANTS_COLLECTION = "YGO_CARD_VARIANT_CACHE_V1"
 
 def get_mongo_client():
-    """Get MongoDB client connection"""
+    """Get MongoDB client connection with proper SSL configuration for Render"""
     try:
-        client = MongoClient(MONGODB_CONNECTION_STRING)
+        # Create SSL context with proper configuration
+        ssl_ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+        
+        # Connect with enhanced SSL settings
+        client = MongoClient(
+            MONGODB_CONNECTION_STRING,
+            ssl=True,
+            ssl_cert_reqs=ssl.CERT_NONE,
+            tlsAllowInvalidCertificates=True,
+            serverSelectionTimeoutMS=30000,
+            connectTimeoutMS=30000,
+            retryWrites=True
+        )
+        
         # Test the connection
         client.admin.command('ping')
+        logger.info("Successfully connected to MongoDB with SSL configuration")
         return client
     except Exception as e:
         logger.error(f"Failed to connect to MongoDB: {str(e)}")
@@ -107,24 +124,39 @@ PRICE_CACHE_COLLECTION = "YGO_CARD_VARIANT_PRICE_CACHE_V1"
 CACHE_EXPIRY_DAYS = 7
 
 def initialize_sync_price_scraping():
-    """Initialize synchronous MongoDB client for price scraping."""
+    """Initialize synchronous MongoDB client for price scraping with enhanced SSL configuration."""
     global sync_price_scraping_client, sync_price_scraping_collection
     try:
         if sync_price_scraping_client is None:
-            sync_price_scraping_client = MongoClient(MONGODB_CONNECTION_STRING)
+            # Use the same SSL configuration as the main MongoDB client
+            sync_price_scraping_client = MongoClient(
+                MONGODB_CONNECTION_STRING,
+                ssl=True,
+                ssl_cert_reqs=ssl.CERT_NONE,
+                tlsAllowInvalidCertificates=True,
+                serverSelectionTimeoutMS=30000,
+                connectTimeoutMS=30000,
+                retryWrites=True
+            )
+            
             db = sync_price_scraping_client.get_default_database()
             sync_price_scraping_collection = db[PRICE_CACHE_COLLECTION]
             
             # Create indexes for efficient querying
-            sync_price_scraping_collection.create_index([
-                ("card_number", 1),
-                ("card_name", 1),
-                ("card_rarity", 1),
-                ("card_art_variant", 1)
-            ], name="card_identification_idx", background=True)
+            try:
+                sync_price_scraping_collection.create_index([
+                    ("card_number", 1),
+                    ("card_name", 1),
+                    ("card_rarity", 1),
+                    ("card_art_variant", 1)
+                ], name="card_identification_idx", background=True)
+                
+                sync_price_scraping_collection.create_index("card_number", name="card_number_idx", background=True)
+                sync_price_scraping_collection.create_index("last_price_updt", name="timestamp_idx", background=True)
+                logger.info("Successfully created indexes for price scraping")
+            except Exception as index_error:
+                logger.warning(f"Failed to create indexes (continuing anyway): {index_error}")
             
-            sync_price_scraping_collection.create_index("card_number", name="card_number_idx", background=True)
-            sync_price_scraping_collection.create_index("last_price_updt", name="timestamp_idx", background=True)
         return True
     except Exception as e:
         logger.error(f"Failed to initialize sync price scraping: {e}")
