@@ -689,10 +689,10 @@ async def select_best_card_variant(
     card_rarity: Optional[str], 
     target_art_version: Optional[str]
 ) -> Optional[str]:
-    """Enhanced variant selection logic with comprehensive debugging."""
+    """Select best card variant prioritizing TCGPlayer rarity validation."""
     try:
         logger.info("="*80)
-        logger.info("STARTING VARIANT SELECTION WITH COMPREHENSIVE DEBUGGING")
+        logger.info("STARTING VARIANT SELECTION WITH TCGPLAYER VALIDATION")
         logger.info(f"Target Card Number: {card_number}")
         logger.info(f"Target Rarity: {card_rarity}")
         logger.info(f"Target Art Version: {target_art_version}")
@@ -725,186 +725,90 @@ async def select_best_card_variant(
                 return variants;
             }
         """)
+
+        if not variants:
+            logger.warning("No variants found")
+            return None
+            
+        logger.info(f"Found {len(variants)} variants to check")
         
-        # Log ALL found variants
-        logger.info(f"FOUND {len(variants)} TOTAL VARIANTS:")
-        for i, variant in enumerate(variants):
-            logger.info(f"  {i+1:2d}. {variant['title']}")
-        logger.info("="*80)
-        
+        # If we only have one variant, verify it meets our requirements
         if len(variants) == 1:
-            logger.info("Only one variant found, selecting automatically")
-            return variants[0]['href']
-        
-        # Get normalized rarity variants for matching
-        rarity_variants = normalize_rarity_for_matching(card_rarity) if card_rarity else []
-        logger.info(f"RARITY MATCHING VARIANTS: {rarity_variants}")
-        logger.info("="*80)
-        
-        # Detailed scoring for each variant
-        variant_scores = []
-        
-        for i, variant in enumerate(variants):
-            title = variant['title']
-            logger.info(f"ANALYZING VARIANT {i+1}: {title}")
-            
-            # Initialize scoring breakdown
-            score_breakdown = {
-                'card_number': 0,
-                'rarity': 0, 
-                'art': 0,
-                'perfect_bonus': 0,
-                'total': 0
-            }
-            
-            # Extract art version from this variant
-            detected_art = extract_art_version(title)
-            logger.info(f"  Detected Art Version: {detected_art}")
-            
-            # Check rarity indicators
-            title_lower = title.lower()
-            rarity_found = []
-            for rarity_variant in rarity_variants:
-                if rarity_variant in title_lower:
-                    rarity_found.append(rarity_variant)
-            logger.info(f"  Rarity Indicators Found: {rarity_found}")
-            
-            # Score card number match
-            if card_number and card_number.lower() in title_lower:
-                score_breakdown['card_number'] = 100
-                logger.info(f"  ✓ Card Number Match: +100")
+            variant = variants[0]
+            if card_rarity:
+                # Open the variant page to verify rarity
+                page_context = await page.context.new_page()
+                try:
+                    await page_context.goto(variant['href'], wait_until='networkidle', timeout=15000)
+                    tcg_rarity = await extract_rarity_from_tcgplayer(page_context)
+                    
+                    if tcg_rarity and normalize_rarity(tcg_rarity) == normalize_rarity(card_rarity):
+                        logger.info(f"Single variant has correct rarity: {tcg_rarity}")
+                        return variant['href']
+                    else:
+                        logger.warning(f"Single variant has wrong rarity. Found: {tcg_rarity}, Expected: {card_rarity}")
+                        return None
+                finally:
+                    await page_context.close()
             else:
-                logger.info(f"  ✗ Card Number Match: +0")
-            
-            # Score rarity matching
-            rarity_matched = False
-            if card_rarity and rarity_found:
-                # Check for exact match first (full rarity name match)
-                exact_rarity_match = False
-                for rarity_variant in rarity_found:
-                    if rarity_variant in ['platinum secret rare', 'quarter century secret rare']:
-                        # For specific rare types, require exact match
-                        if rarity_variant == card_rarity.lower().strip():
-                            exact_rarity_match = True
-                            rarity_matched = True
-                            score_breakdown['rarity'] = 150
-                            logger.info(f"  ✓ Exact Specific Rarity Match: +150")
-                            break
+                return variant['href']
+
+        # For multiple variants, first filter by card number
+        matching_variants = [
+            v for v in variants 
+            if card_number.lower() in v['title'].lower()
+        ]
+
+        if not matching_variants:
+            logger.warning(f"No variants found matching card number {card_number}")
+            return None
+
+        # If art variant is specified, filter by that first
+        if target_art_version:
+            art_matching_variants = []
+            for variant in matching_variants:
+                title_lower = variant['title'].lower()
+                art_version_lower = target_art_version.lower()
                 
-                # If no exact match found, check for partial matches
-                if not exact_rarity_match:
-                    for rarity_variant in rarity_found:
-                        if rarity_variant == card_rarity.lower().strip():
-                            rarity_matched = True
-                            score_breakdown['rarity'] = 150
-                            logger.info(f"  ✓ Exact Rarity Match: +150")
-                            break
-                        elif rarity_variant in card_rarity.lower():
-                            # Only allow partial match for non-specific rarities
-                            if card_rarity.lower().strip() not in ['platinum secret rare', 'quarter century secret rare']:
-                                rarity_matched = True
-                                score_breakdown['rarity'] = 120
-                                logger.info(f"  ✓ Rarity Variant Match: +120")
-                                break
-                            else:
-                                # For specific rarities like "platinum secret rare", partial matches get heavy penalty
-                                score_breakdown['rarity'] = -400  # Much heavier penalty
-                                logger.info(f"  ✗ Wrong Specific Rarity ('{rarity_variant}' vs '{card_rarity}'): -400")
-                                break
-            elif card_rarity and not rarity_found and any(r in card_rarity.lower() for r in ['secret', 'ultra', 'super', 'rare']):
-                score_breakdown['rarity'] = -300
-                logger.info(f"  ✗ No Rarity Found (Base Version): -300")
-            else:
-                logger.info(f"  • No Rarity Scoring Applied")
-            
-            # Score art variant matching with higher priority when explicitly requested
-            art_matched = False
-            if target_art_version and detected_art:
-                # Handle both numbered and named art variants
-                if target_art_version.isdigit() or any(suffix in target_art_version.lower() for suffix in ['st', 'nd', 'rd', 'th']):
-                    # Numbered art variant (e.g., "7", "7th", "1st")
-                    target_clean = re.sub(r'(st|nd|rd|th)$', '', target_art_version.lower().strip())
-                    detected_clean = re.sub(r'(st|nd|rd|th)$', '', detected_art.lower().strip())
+                # Check for art variant in title
+                if art_version_lower in title_lower:
+                    art_matching_variants.append(variant)
+
+            if art_matching_variants:
+                matching_variants = art_matching_variants
+                logger.info(f"Found {len(matching_variants)} variants matching art variant {target_art_version}")
+
+        # Check each remaining variant's rarity via TCGPlayer
+        if card_rarity:
+            for variant in matching_variants:
+                page_context = await page.context.new_page()
+                try:
+                    logger.info(f"Checking rarity for variant: {variant['title']}")
+                    await page_context.goto(variant['href'], wait_until='networkidle', timeout=15000)
+                    tcg_rarity = await extract_rarity_from_tcgplayer(page_context)
                     
-                    if target_clean == detected_clean:
-                        art_matched = True
-                        score_breakdown['art'] = 300
-                        logger.info(f"  ✓ EXACT NUMBERED ART MATCH '{target_clean}' == '{detected_clean}': +300")
-                    else:
-                        score_breakdown['art'] = -500
-                        logger.info(f"  ✗ NUMBERED ART MISMATCH '{target_clean}' != '{detected_clean}': -500")
-                else:
-                    # Named art variant (e.g., "Arkana", "Joey Wheeler")
-                    target_clean = target_art_version.lower().strip()
-                    detected_clean = detected_art.lower().strip();
-                    
-                    if target_clean == detected_clean:
-                        art_matched = True
-                        score_breakdown['art'] = 300
-                        logger.info(f"  ✓ EXACT NAMED ART MATCH '{target_art_version}' == '{detected_art}': +300")
-                    else:
-                        # For named variants, also check partial matches (in case of formatting differences)
-                        if target_clean in detected_clean or detected_clean in target_clean:
-                            art_matched = True
-                            score_breakdown['art'] = 250  # Slightly lower score for partial match
-                            logger.info(f"  ✓ PARTIAL NAMED ART MATCH '{target_art_version}' ~= '{detected_art}': +250")
+                    if tcg_rarity:
+                        normalized_tcg = normalize_rarity(tcg_rarity)
+                        normalized_requested = normalize_rarity(card_rarity)
+                        
+                        logger.info(f"TCGPlayer rarity: {tcg_rarity} ({normalized_tcg})")
+                        logger.info(f"Requested rarity: {card_rarity} ({normalized_requested})")
+                        
+                        if normalized_tcg == normalized_requested:
+                            logger.info("✓ Found matching rarity from TCGPlayer!")
+                            return variant['href']
                         else:
-                            score_breakdown['art'] = -500
-                            logger.info(f"  ✗ NAMED ART MISMATCH '{target_art_version}' != '{detected_art}': -500")
-            elif target_art_version and not detected_art:
-                score_breakdown['art'] = -100
-                logger.info(f"  ✗ No Art Info Found: -100")
-            else:
-                logger.info(f"  • No Art Scoring Applied")
+                            logger.info("✗ TCGPlayer rarity does not match")
+                    else:
+                        logger.info("Could not extract rarity from TCGPlayer")
+                finally:
+                    await page_context.close()
+        
+        # If we get here with no match but have variants, return first matching variant
+        if matching_variants:
+            logger.warning("No exact rarity match found, using first matching variant")
+            return matching_variants[0]['href']
             
-            # Perfect match bonus - now prioritizes art+rarity combination
-            if rarity_matched and art_matched and target_art_version and card_rarity:
-                score_breakdown['perfect_bonus'] = 200  # Reduced from 500 since art score is higher now
-                logger.info(f"  🎯 PERFECT MATCH BONUS (Rarity + Art): +200")
-            
-            # Calculate total
-            score_breakdown['total'] = (score_breakdown['card_number'] + 
-                                      score_breakdown['rarity'] + 
-                                      score_breakdown['art'] + 
-                                      score_breakdown['perfect_bonus'])
-            
-            logger.info(f"  TOTAL SCORE: {score_breakdown['total']}")
-            logger.info("-" * 60)
-            
-            variant_scores.append({
-                'variant': variant,
-                'title': title,
-                'detected_art': detected_art,
-                'rarity_found': rarity_found,
-                'score_breakdown': score_breakdown,
-                'total_score': score_breakdown['total']
-            })
-        
-        # Sort by score
-        variant_scores.sort(key=lambda x: x['total_score'], reverse=True)
-        
-        # Show final ranking
-        logger.info("FINAL VARIANT RANKING:")
-        for i, vs in enumerate(variant_scores[:5]):  # Show top 5
-            logger.info(f"  {i+1}. Score: {vs['total_score']:4d} | Art: {vs['detected_art'] or 'None':4s} | {vs['title'][:60]}...")
-        
-        if variant_scores and variant_scores[0]['total_score'] > 0:
-            selected = variant_scores[0]
-            logger.info("="*80)
-            logger.info(f"SELECTED VARIANT:")
-            logger.info(f"  Title: {selected['title']}")
-            logger.info(f"  Score: {selected['total_score']}")
-            logger.info(f"  Art: {selected['detected_art']}")
-            logger.info(f"  Rarities Found: {selected['rarity_found']}")
-            logger.info("="*80)
-            return selected['variant']['href']
-        
-        # No good matches found
-        if variants:
-            logger.warning("NO GOOD MATCHES FOUND - Using first variant as fallback")
-            logger.warning(f"Fallback: {variants[0]['title']}")
-            return variants[0]['href']
-        
         return None
         
     except Exception as e:
@@ -1039,58 +943,68 @@ async def scrape_price_from_pricecharting(
                     await browser.close()
                     return None
             
-            # Get final page URL and title
+            # Get final page URL
             final_url = page.url
-            page_title = await page.title()
             
-            # Extract the ACTUAL art variant from the scraped page title/URL
+            # Extract clean card name from page title
+            page_title = await page.evaluate("""
+                () => {
+                    // Try to get the product name first
+                    const productName = document.getElementById('product_name');
+                    if (productName) {
+                        let name = productName.textContent.trim();
+                        // Clean up the product name
+                        name = name
+                            .replace(/\[(.*?)\]/g, '')  // Remove anything in square brackets
+                            .replace(/\s*SUDA-[A-Z]{2}\d+\s*/g, '')  // Remove card number
+                            .replace(/\s+/g, ' ')  // Normalize spaces
+                            .trim();
+                        return name;
+                    }
+                    
+                    // Fallback to page title
+                    const title = document.title;
+                    if (!title) return '';
+                    
+                    // Clean up the title
+                    let cleanTitle = title
+                        .replace(/Prices \| YuGiOh/g, '')
+                        .replace(/\| YuGiOh Cards/g, '')
+                        .replace(/Price Guide/g, '')
+                        .replace(/\[(.*?)\]/g, '')  // Remove anything in square brackets
+                        .replace(/\s*SUDA-[A-Z]{2}\d+\s*/g, '')  // Remove card number
+                        .replace(/\s+/g, ' ')  // Normalize spaces
+                        .trim();
+                        
+                    return cleanTitle;
+                }
+            """)
+            
+            # Extract the ACTUAL art variant from the cleaned title
             actual_art_variant = extract_art_version(page_title)
             if not actual_art_variant:
                 # Also try extracting from URL
                 actual_art_variant = extract_art_version(final_url)
             
-            # Check if we need to validate rarity from TCGPlayer
-            detected_rarity_from_title = None
+            # Extract and validate rarity
+            detected_rarity = None
             if card_rarity:
-                # Check if the requested rarity appears in the page title
-                rarity_variants = normalize_rarity_for_matching(card_rarity)
-                title_lower = page_title.lower()
-                
-                for rarity_variant in rarity_variants:
-                    if rarity_variant in title_lower:
-                        detected_rarity_from_title = rarity_variant
-                        break
-                
-                # If no rarity detected in title but we have a specific rarity request,
-                # check TCGPlayer to validate this is the correct variant
-                if not detected_rarity_from_title:
-                    logger.info(f"No rarity detected in title for requested '{card_rarity}', checking TCGPlayer...")
-                    tcg_rarity = await extract_rarity_from_tcgplayer(page)
+                # Try to extract rarity from TCGPlayer first
+                tcg_rarity = await extract_rarity_from_tcgplayer(page)
+                if tcg_rarity:
+                    detected_rarity = tcg_rarity
+                else:
+                    # Fallback to checking page title for rarity
+                    rarity_variants = normalize_rarity_for_matching(card_rarity)
+                    title_lower = page_title.lower()
                     
-                    if tcg_rarity:
-                        # Normalize TCGPlayer rarity for comparison
-                        tcg_normalized = normalize_rarity(tcg_rarity)
-                        requested_normalized = normalize_rarity(card_rarity)
-                        
-                        if tcg_normalized == requested_normalized:
-                            logger.info(f"✓ TCGPlayer confirms rarity: '{tcg_rarity}' matches requested '{card_rarity}'")
-                            detected_rarity_from_title = tcg_rarity  # Use the actual rarity from TCGPlayer
-                        else:
-                            logger.warning(f"✗ TCGPlayer rarity mismatch: '{tcg_rarity}' vs requested '{card_rarity}'")
-                            # This means we selected the wrong variant - the title has no rarity 
-                            # but TCGPlayer shows a different rarity than requested
-                            await browser.close()
-                            return {
-                                "card_number": card_number,
-                                "card_name": card_name or '',
-                                "card_art_variant": art_variant,
-                                "card_rarity": card_rarity,
-                                "scrape_success": False,
-                                "error_message": f"Rarity mismatch: found '{tcg_rarity}' but requested '{card_rarity}'",
-                                "last_price_updt": datetime.now(UTC)
-                            }
-                    else:
-                        logger.warning(f"Could not validate rarity from TCGPlayer for variant with no title rarity")
+                    for rarity_variant in rarity_variants:
+                        if rarity_variant in title_lower:
+                            detected_rarity = rarity_variant
+                            break
+            
+            # If we still don't have a rarity, use the requested one
+            final_rarity = detected_rarity if detected_rarity else card_rarity
             
             # Extract prices from the product page
             price_data = await extract_prices_from_dom(page)
@@ -1100,30 +1014,18 @@ async def scrape_price_from_pricecharting(
                 await browser.close()
                 return None
             
-            # Log the comparison for debugging
-            if art_variant and actual_art_variant and art_variant != actual_art_variant:
-                logger.warning(f"Art variant mismatch! Requested: '{art_variant}', Found: '{actual_art_variant}' in page: {page_title}")
-            elif actual_art_variant:
-                logger.info(f"Successfully matched art variant: '{actual_art_variant}' in page: {page_title}")
-            
-            # Use the actual art variant found on the page, not the requested one
-            final_art_variant = actual_art_variant if actual_art_variant else art_variant
-            
-            # Use the detected rarity (either from title or TCGPlayer validation)
-            final_rarity = detected_rarity_from_title if detected_rarity_from_title else card_rarity
-            
             # Extract set code and booster set name
             set_code = extract_set_code(card_number)
             booster_set_name = extract_booster_set_name(final_url)
             
             await browser.close()
             
-            # Create price record with ACTUAL art variant and validated rarity
+            # Create price record with clean data
             price_record = {
                 "card_number": card_number,
-                "card_name": page_title,  # Use actual page title, not requested name
-                "card_art_variant": final_art_variant,  # Use actual art variant found on page
-                "card_rarity": final_rarity,  # Use validated rarity (from title or TCGPlayer)
+                "card_name": page_title,  # Use cleaned page title
+                "card_art_variant": actual_art_variant,  # Use actual art variant found
+                "card_rarity": final_rarity,  # Use detected or requested rarity
                 "set_code": set_code,
                 "booster_set_name": booster_set_name,
                 "tcg_price": price_data.get('tcgPlayerPrice'),
@@ -1239,32 +1141,18 @@ def scrape_card_price():
                 
                 cache_age = datetime.now(UTC) - last_update
                 
+                # Clean the cached data before returning
+                cleaned_data = clean_card_data(cached_data)
+                
                 return jsonify({
                     "success": True,
-                    "data": {
-                        "card_number": cached_data.get('card_number'),
-                        "card_name": cached_data.get('card_name'),
-                        "card_art_variant": cached_data.get('card_art_variant'),
-                        "card_rarity": cached_data.get('card_rarity'),
-                        "set_code": cached_data.get('set_code'),
-                        "booster_set_name": cached_data.get('booster_set_name'),
-                        "tcg_price": cached_data.get('tcg_price'),
-                        "pc_ungraded_price": cached_data.get('pc_ungraded_price'),
-                        "pc_grade7": cached_data.get('pc_grade7'),
-                        "pc_grade8": cached_data.get('pc_grade8'),
-                        "pc_grade9": cached_data.get('pc_grade9'),
-                        "pc_grade9_5": cached_data.get('pc_grade9_5'),
-                        "pc_grade10": cached_data.get('pc_grade10'),
-                        "last_price_updt": cached_data.get('last_price_updt'),
-                        "source_url": cached_data.get('source_url'),
-                        "scrape_success": True,
-                        "is_cached": True,
-                        "cache_age_hours": cache_age.total_seconds() / 3600
-                    },
-                    "message": "Price data retrieved from cache"
+                    "data": cleaned_data,
+                    "message": "Price data retrieved from cache",
+                    "is_cached": True,
+                    "cache_age_hours": cache_age.total_seconds() / 3600
                 })
         
-        # Scrape fresh data using async function (only scraping is async)
+        # Scrape fresh data using async function
         async def scrape_data():
             return await scrape_price_from_pricecharting(
                 card_number=card_number,
@@ -1273,7 +1161,7 @@ def scrape_card_price():
                 art_variant=art_variant
             )
         
-        # Run only the scraping in async context
+        # Run scraping in async context
         logger.info(f"Scraping fresh price data for {card_number}")
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -1288,31 +1176,32 @@ def scrape_card_price():
                 "error": "Failed to scrape price data"
             }, 500)
         
-        # Save to cache using synchronous function (no event loop conflicts)
+        # Clean the scraped data
+        cleaned_price_data = clean_card_data(price_data)
+        
+        # Save cleaned data to cache
         try:
-            saved = save_price_data_sync(price_data)
+            saved = save_price_data_sync(cleaned_price_data)
             if not saved:
                 logger.warning(f"Failed to save price data to cache for {card_number}")
-                # Still return the scraped data even if cache save fails
                 return jsonify({
                     "success": True,
-                    "data": price_data,
+                    "data": cleaned_price_data,
                     "message": "Price data scraped successfully but failed to save to cache",
                     "cache_warning": "Cache save failed"
                 })
         except Exception as e:
             logger.error(f"Error saving to cache: {e}")
-            # Still return the scraped data even if cache save fails
             return jsonify({
                 "success": True,
-                "data": price_data,
+                "data": cleaned_price_data,
                 "message": "Price data scraped successfully but failed to save to cache",
                 "cache_error": str(e)
             })
         
         return jsonify({
             "success": True,
-            "data": price_data,
+            "data": cleaned_price_data,
             "message": "Price data scraped and saved successfully"
         })
         
@@ -1398,26 +1287,53 @@ def debug_art_extraction():
         }), 500
 
 async def extract_rarity_from_tcgplayer(page) -> Optional[str]:
-    """Extract rarity information from TCGPlayer via the 'SEE IT' link."""
+    """Extract rarity information from TCGPlayer via any TCGPlayer link on the page."""
     try:
-        # Look for TCGPlayer "SEE IT" link
+        # Find TCGPlayer link with more comprehensive search
         tcgplayer_link = await page.evaluate("""
             () => {
-                const links = Array.from(document.querySelectorAll('a'));
-                for (const link of links) {
-                    if (link.href.includes('tcgplayer.com') && 
-                        (link.textContent.includes('SEE IT') || link.textContent.includes('View on TCGPlayer'))) {
-                        return link.href;
+                // First try explicit "SEE IT" button or TCGPlayer link
+                const buttons = Array.from(document.querySelectorAll('a, button'));
+                const tcgButton = buttons.find(b => 
+                    b.getAttribute('href')?.includes('tcgplayer.com') && 
+                    (b.textContent.includes('SEE IT') || 
+                     b.textContent.includes('TCGplayer') ||
+                     b.textContent.includes('Buy Now'))
+                );
+                
+                if (tcgButton?.href) {
+                    console.log('Found TCGPlayer button:', tcgButton.textContent);
+                    return tcgButton.href;
+                }
+                
+                // Then try price comparison section
+                const priceSection = document.querySelector('#tcg_prices, #price-comparison');
+                if (priceSection) {
+                    const tcgLinks = Array.from(priceSection.querySelectorAll('a'))
+                        .filter(a => a.href?.includes('tcgplayer.com'));
+                    if (tcgLinks.length > 0) {
+                        console.log('Found TCGPlayer link in price section');
+                        return tcgLinks[0].href;
                     }
                 }
+                
+                // Last resort: any TCGPlayer link
+                const allTcgLinks = Array.from(document.querySelectorAll('a'))
+                    .filter(a => a.href?.includes('tcgplayer.com'));
+                if (allTcgLinks.length > 0) {
+                    console.log('Found general TCGPlayer link');
+                    return allTcgLinks[0].href;
+                }
+                
+                console.log('NO TCGPlayer links found');
                 return null;
             }
-        """)
+        """);
         
         if not tcgplayer_link:
             logger.debug("No TCGPlayer link found")
             return None
-        
+            
         logger.info(f"Found TCGPlayer link: {tcgplayer_link}")
         
         # Open TCGPlayer page in a new tab
@@ -1425,25 +1341,98 @@ async def extract_rarity_from_tcgplayer(page) -> Optional[str]:
         try:
             await tcg_page.goto(tcgplayer_link, wait_until='networkidle', timeout=15000)
             
-            # Extract rarity from TCGPlayer page
-            rarity = await tcg_page.evaluate(r"""
+            # Extract rarity from TCGPlayer page with multiple attempts
+            rarity = await tcg_page.evaluate("""
                 () => {
-                    // Look for rarity information in various formats
-                    const patterns = [
-                        /Rarity:\s*([^\n<]+)/i,
-                        /rarity["']?\s*:\s*["']?([^"',\n<]+)/i,
-                        /"rarity"\s*:\s*"([^"]+)"/i
-                    ];
+                    function normalizeRarity(text) {
+                        if (!text) return '';
+                        return text.trim()
+                            .replace(/\\s+/g, ' ')
+                            .replace(/[-_]/g, ' ')
+                            .toLowerCase();
+                    }
                     
-                    const text = document.body.textContent || '';
+                    // Try multiple methods to find rarity
                     
-                    for (const pattern of patterns) {
-                        const match = text.match(pattern);
-                        if (match && match[1]) {
-                            return match[1].trim();
+                    // 1. Look for rarity in product details section
+                    const productDetails = document.querySelector('[class*="product-details"], [class*="card-details"], .details');
+                    if (productDetails) {
+                        console.log('Found product details section');
+                        const detailsText = productDetails.textContent;
+                        const rarityMatch = detailsText.match(/Rarity:?\s*([^\\n,]+)/i);
+                        if (rarityMatch) {
+                            console.log('Found rarity in product details:', rarityMatch[1]);
+                            return rarityMatch[1].trim();
                         }
                     }
                     
+                    // 2. Check listing titles for rarity
+                    const listings = Array.from(document.querySelectorAll('[class*="listing"], [class*="product-title"]'));
+                    for (const listing of listings) {
+                        const text = listing.textContent;
+                        // First check for Quarter Century variants
+                        if (/quarter[-\\s]century\\s+secret\\s+rare/i.test(text)) {
+                            console.log('Found Quarter Century Secret Rare in listing');
+                            return 'Quarter Century Secret Rare';
+                        }
+                        if (/quarter[-\\s]century\\s+ultra\\s+rare/i.test(text)) {
+                            console.log('Found Quarter Century Ultra Rare in listing');
+                            return 'Quarter Century Ultra Rare';
+                        }
+                        // Then check other rarities
+                        if (/secret\\s+rare/i.test(text)) {
+                            console.log('Found Secret Rare in listing');
+                            return 'Secret Rare';
+                        }
+                        // ... add other rarity checks as needed
+                    }
+                    
+                    // 3. Check page heading/title
+                    const heading = document.querySelector('h1');
+                    if (heading) {
+                        const text = heading.textContent;
+                        const rarityMatch = text.match(/\\[(.*?rare.*?)\\]/i);
+                        if (rarityMatch) {
+                            console.log('Found rarity in heading:', rarityMatch[1]);
+                            return rarityMatch[1].trim();
+                        }
+                    }
+                    
+                    // 4. Look for rarity in structured data
+                    const scriptTags = Array.from(document.querySelectorAll('script[type="application/ld+json"]'));
+                    for (const script of scriptTags) {
+                        try {
+                            const data = JSON.parse(script.textContent);
+                            if (data.rarity) {
+                                console.log('Found rarity in structured data:', data.rarity);
+                                return data.rarity;
+                            }
+                        } catch (e) {
+                            // Ignore parsing errors
+                        }
+                    }
+                    
+                    // 5. Search entire page for rarity patterns
+                    const pageText = document.body.textContent;
+                    const rarityPatterns = [
+                        /quarter[-\\s]century\\s+secret\\s+rare/i,
+                        /quarter[-\\s]century\\s+ultra\\s+rare/i,
+                        /secret\\s+rare/i,
+                        /ultra\\s+rare/i,
+                        /super\\s+rare/i,
+                        /rare/i,
+                        /common/i
+                    ];
+                    
+                    for (const pattern of rarityPatterns) {
+                        const match = pageText.match(pattern);
+                        if (match) {
+                            console.log('Found rarity in page text:', match[0]);
+                            return match[0].trim();
+                        }
+                    }
+                    
+                    console.log('No rarity found with any method');
                     return null;
                 }
             """)
@@ -1453,6 +1442,9 @@ async def extract_rarity_from_tcgplayer(page) -> Optional[str]:
                 return rarity.strip()
             else:
                 logger.debug("No rarity found on TCGPlayer page")
+                # Log the page content for debugging
+                page_content = await tcg_page.content()
+                logger.debug(f"TCGPlayer page content: {page_content[:1000]}...")
                 return None
                 
         finally:
@@ -1967,6 +1959,98 @@ def internal_error(error):
         "success": False,
         "error": "Internal server error"
     }), 500
+
+def clean_card_data(price_data: Dict) -> Dict:
+    """Clean up card data before returning it in the response."""
+    try:
+        cleaned = price_data.copy()
+        
+        # Clean up card name
+        if 'card_name' in cleaned:
+            name = cleaned['card_name']
+            # Remove price guide suffixes and other unwanted text
+            name = re.sub(r'Prices\s*\|.*$', '', name, flags=re.IGNORECASE)
+            name = re.sub(r'\|.*?Cards.*$', '', name, flags=re.IGNORECASE)
+            name = re.sub(r'Price\s*Guide.*$', '', name, flags=re.IGNORECASE)
+            # Remove card number
+            name = re.sub(r'\s*[A-Z]{2,4}-[A-Z]{2}\d+\s*', '', name)
+            # Remove square bracket content
+            name = re.sub(r'\[.*?\]', '', name)
+            # Clean up spaces
+            name = re.sub(r'\s+', ' ', name).strip()
+            cleaned['card_name'] = name
+        
+        # Clean up rarity with stricter pattern matching
+        if 'card_rarity' in cleaned:
+            rarity = str(cleaned['card_rarity'])
+            
+            # Define rarity search patterns in order of specificity
+            rarity_patterns = [
+                # Quarter Century variants - most specific first
+                (r'quarter[\s-]century\s+secret\s+rare', 'Quarter Century Secret Rare'),
+                (r'quarter[\s-]century\s+ultra\s+rare', 'Quarter Century Ultra Rare'),
+                (r'quarter[\s-]century\s+rare', 'Quarter Century Rare'),
+                (r'25th\s+anniversary\s+secret\s+rare', 'Quarter Century Secret Rare'),
+                # Specific rare variants
+                (r'platinum\s+secret\s+rare', 'Platinum Secret Rare'),
+                (r'starlight\s+rare', 'Starlight Rare'),
+                (r'collectors?\s+rare', "Collector's Rare"),
+                (r'ghost\s+rare', 'Ghost Rare'),
+                (r'ultimate\s+rare', 'Ultimate Rare'),
+                # Standard rarities
+                (r'secret\s+rare', 'Secret Rare'),
+                (r'ultra\s+rare', 'Ultra Rare'),
+                (r'super\s+rare', 'Super Rare'),
+                (r'\brare\b', 'Rare'),
+                (r'\bcommon\b', 'Common')
+            ]
+            
+            # Try to find a matching rarity pattern
+            found_rarity = None
+            for pattern, replacement in rarity_patterns:
+                if re.search(pattern, rarity.lower()):
+                    found_rarity = replacement
+                    break
+            
+            if found_rarity:
+                cleaned['card_rarity'] = found_rarity
+            else:
+                # If no standard pattern matched, try to clean up what we have
+                # First check if it's a long string (like page content)
+                if len(rarity) > 200:
+                    # Try to extract rarity from the long text
+                    for pattern, replacement in rarity_patterns:
+                        if re.search(pattern, rarity.lower()):
+                            found_rarity = replacement
+                            break
+                    
+                    if found_rarity:
+                        cleaned['card_rarity'] = found_rarity
+                    else:
+                        # If we still can't find a rarity, use normalize_rarity
+                        normalized = normalize_rarity(rarity[:200])
+                        cleaned['card_rarity'] = normalized
+                else:
+                    # Short string but no pattern match - normalize it
+                    cleaned['card_rarity'] = normalize_rarity(rarity)
+        
+        # Do a final check to ensure critical fields don't contain page content
+        for field in ['card_name', 'card_rarity']:
+            if field in cleaned and isinstance(cleaned[field], str):
+                value = cleaned[field]
+                # If field is suspiciously long (>200 chars), it might be page content
+                if len(value) > 200:
+                    # Try to extract meaningful content from the first part
+                    first_sentence = re.split(r'[.!?]\s+', value)[0]
+                    if len(first_sentence) > 100:
+                        first_sentence = first_sentence[:100]
+                    cleaned[field] = first_sentence + '... (truncated)'
+                    logger.warning(f"Found suspiciously long {field}, truncated to first sentence")
+        
+        return cleaned
+    except Exception as e:
+        logger.error(f"Error cleaning card data: {e}")
+        return price_data  # Return original if cleaning fails
 
 if __name__ == '__main__':
     # Get port from environment variable or default to 8081
