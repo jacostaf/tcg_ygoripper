@@ -462,29 +462,43 @@ def find_cached_price_data_sync(
 
 def _check_freshness_and_return(document) -> tuple[bool, Optional[Dict]]:
     """Helper function to check cache freshness and return the result."""
-    # Check if data is fresh (within expiry period)
-    expiry_date = datetime.now(UTC) - timedelta(days=CACHE_EXPIRY_DAYS)
-    last_update = document.get('last_price_updt', datetime.min)
-    
-    # Handle both datetime objects and timezone-naive datetime strings
-    if isinstance(last_update, str):
-        try:
-            last_update = datetime.fromisoformat(last_update.replace('Z', '+00:00'))
-        except:
-            last_update = datetime.min
-    
-    # Ensure timezone awareness
-    if last_update.tzinfo is None:
-        last_update = last_update.replace(tzinfo=UTC)
-    
-    is_fresh = last_update > expiry_date
-    
-    if is_fresh:
-        logger.info(f"  ✅ Found FRESH cached data (updated: {last_update})")
-    else:
-        logger.info(f"  ⚠️  Found STALE cached data (updated: {last_update}, expired: {expiry_date})")
-    
-    return is_fresh, document
+    try:
+        # Check if data is fresh (within expiry period)
+        expiry_date = datetime.now(UTC) - timedelta(days=CACHE_EXPIRY_DAYS)
+        last_update = document.get('last_price_updt', datetime.min.replace(tzinfo=UTC))
+        
+        # Handle different date formats
+        if isinstance(last_update, str):
+            try:
+                # Try ISO format first
+                last_update = datetime.fromisoformat(last_update.replace('Z', '+00:00'))
+            except ValueError:
+                try:
+                    # Try RFC format (e.g., "Tue, 03 Jun 2025 03:49:48 GMT")
+                    last_update = datetime.strptime(last_update, "%a, %d %b %Y %H:%M:%S GMT")
+                    last_update = last_update.replace(tzinfo=UTC)
+                except ValueError:
+                    logger.error(f"Could not parse date string: {last_update}")
+                    last_update = datetime.min.replace(tzinfo=UTC)
+        
+        # Ensure timezone awareness
+        if last_update.tzinfo is None:
+            last_update = last_update.replace(tzinfo=UTC)
+        
+        is_fresh = last_update > expiry_date
+        
+        if is_fresh:
+            logger.info(f"  ✅ Found FRESH cached data (updated: {last_update})")
+            # Ensure the document has a properly formatted date before returning
+            document['last_price_updt'] = last_update
+        else:
+            logger.info(f"  ⚠️  Found STALE cached data (updated: {last_update}, expired: {expiry_date})")
+        
+        return is_fresh, document
+        
+    except Exception as e:
+        logger.error(f"Error checking cache freshness: {e}")
+        return False, None
 
 def validate_card_rarity_sync(card_number: str, card_rarity: str) -> bool:
     """Validate the requested rarity against available rarities using synchronous MongoDB client."""
@@ -1161,7 +1175,9 @@ def scrape_card_price():
         card_name = data.get('card_name', '').strip() if data.get('card_name') else None
         card_rarity = data.get('card_rarity', '').strip() if data.get('card_rarity') else None
         art_variant = data.get('art_variant', '').strip() if data.get('art_variant') else None
-        force_refresh = data.get('force_refresh', False)
+        
+        # Convert force_refresh to boolean properly
+        force_refresh = str(data.get('force_refresh', '')).lower() == 'true'
         
         # Validate that card_rarity is provided
         if not card_rarity:
@@ -1170,7 +1186,7 @@ def scrape_card_price():
                 "error": "card_rarity is required and cannot be empty"
             }), 400
         
-        logger.info(f"Price request for card: {card_number}, name: {card_name}, rarity: {card_rarity}, art: {art_variant}")
+        logger.info(f"Price request for card: {card_number}, name: {card_name}, rarity: {card_rarity}, art: {art_variant}, force_refresh: {force_refresh}")
         
         # Initialize synchronous connections
         initialize_sync_price_scraping()
@@ -1187,26 +1203,38 @@ def scrape_card_price():
         
         # Check cache first unless force refresh is requested
         if not force_refresh:
+            # Normalize art variant before cache lookup
+            normalized_art = None
+            if art_variant:
+                if art_variant.isdigit() or any(suffix in art_variant.lower() for suffix in ['st', 'nd', 'rd', 'th']):
+                    normalized_art = re.sub(r'(st|nd|rd|th)$', '', art_variant.lower().strip())
+                else:
+                    normalized_art = art_variant.lower().strip()
+            
             is_fresh, cached_data = find_cached_price_data_sync(
                 card_number=card_number,
                 card_name=card_name,
                 card_rarity=card_rarity,
-                art_variant=art_variant
+                art_variant=normalized_art
             )
             
             if is_fresh and cached_data:
                 logger.info(f"Using cached price data for {card_number}")
                 
                 # Fix cache age calculation with proper timezone handling
-                last_update = cached_data.get('last_price_updt', datetime.now(UTC))
+                last_update = cached_data.get('last_price_updt')
                 if isinstance(last_update, str):
                     try:
                         last_update = datetime.fromisoformat(last_update.replace('Z', '+00:00'))
-                    except:
-                        last_update = datetime.now(UTC)
+                    except ValueError:
+                        try:
+                            last_update = datetime.strptime(last_update, "%a, %d %b %Y %H:%M:%S GMT")
+                            last_update = last_update.replace(tzinfo=UTC)
+                        except ValueError:
+                            last_update = datetime.now(UTC)
                 
                 # Ensure timezone awareness
-                if last_update.tzinfo is None:
+                if not last_update.tzinfo:
                     last_update = last_update.replace(tzinfo=UTC)
                 
                 cache_age = datetime.now(UTC) - last_update
@@ -1229,6 +1257,7 @@ def scrape_card_price():
                         "pc_grade10": cached_data.get('pc_grade10'),
                         "last_price_updt": cached_data.get('last_price_updt'),
                         "source_url": cached_data.get('source_url'),
+                        "scrape_success": True,
                         "is_cached": True,
                         "cache_age_hours": cache_age.total_seconds() / 3600
                     },
