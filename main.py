@@ -364,7 +364,8 @@ def _check_freshness_and_return(document) -> tuple[bool, Optional[Dict]]:
     """Helper function to check cache freshness and return the result."""
     try:
         # Check if data is fresh (within expiry period)
-        expiry_date = datetime.now(UTC) - timedelta(days=CACHE_EXPIRY_DAYS)
+        current_time = datetime.now(UTC)
+        expiry_date = current_time - timedelta(days=CACHE_EXPIRY_DAYS)
         
         # Get last update time
         last_update = document.get('last_price_updt')
@@ -377,16 +378,18 @@ def _check_freshness_and_return(document) -> tuple[bool, Optional[Dict]]:
             except ValueError:
                 try:
                     # Try RFC format
-                    last_update = datetime.strptime(last_update, "%a, %d %b %Y %H:%M:%S GMT")
+                    last_update = datetime.strptime(last_update, "%a, %d %b %Y %H:%M:%S GMT").replace(tzinfo=UTC)
                 except ValueError:
                     logger.error(f"Could not parse date string: {last_update}")
                     last_update = datetime.min.replace(tzinfo=UTC)
         elif isinstance(last_update, datetime):
+            # Ensure timezone awareness - convert naive to UTC if needed
             if last_update.tzinfo is None:
                 last_update = last_update.replace(tzinfo=UTC)
         else:
             last_update = datetime.min.replace(tzinfo=UTC)
         
+        # At this point both dates should be timezone-aware (UTC)
         is_fresh = last_update > expiry_date
         
         if is_fresh:
@@ -905,11 +908,15 @@ async def scrape_price_from_pricecharting(
             
             # Extract and validate rarity
             detected_rarity = None
+            detected_art = None
             if card_rarity:
                 # Try to extract rarity from TCGPlayer first
-                tcg_rarity = await extract_rarity_from_tcgplayer(page)
+                tcg_result = await extract_rarity_from_tcgplayer(page)
+                tcg_rarity, tcg_art = tcg_result if tcg_result else (None, None)
+                
                 if tcg_rarity:
                     detected_rarity = tcg_rarity
+                    detected_art = tcg_art
                 else:
                     # Fallback to checking page title for rarity
                     rarity_variants = normalize_rarity_for_matching(card_rarity)
@@ -923,13 +930,12 @@ async def scrape_price_from_pricecharting(
             # If we still don't have a rarity, use the requested one
             final_rarity = detected_rarity if detected_rarity else card_rarity
             
+            # For art variant, use detected one from TCGPlayer if available,
+            # otherwise use what we extracted from title or URL, or fall back to provided one
+            final_art_variant = detected_art if detected_art else (actual_art_variant if actual_art_variant else art_variant)
+            
             # Extract prices from the product page
             price_data = await extract_prices_from_dom(page)
-            
-            if not price_data:
-                logger.warning(f"No price data extracted for {card_number}")
-                await browser.close()
-                return None
             
             # Extract set code and booster set name
             set_code = extract_set_code(card_number)
@@ -941,7 +947,7 @@ async def scrape_price_from_pricecharting(
             price_record = {
                 "card_number": card_number,
                 "card_name": page_title,  # Use cleaned page title
-                "card_art_variant": actual_art_variant,  # Use actual art variant found
+                "card_art_variant": final_art_variant,  # Use actual art variant found
                 "card_rarity": final_rarity,  # Use detected or requested rarity
                 "set_code": set_code,
                 "booster_set_name": booster_set_name,
