@@ -643,13 +643,20 @@ async def select_best_card_variant(
                 page_context = await page.context.new_page()
                 try:
                     await page_context.goto(variant['href'], wait_until='networkidle', timeout=15000)
-                    tcg_rarity = await extract_rarity_from_tcgplayer(page_context)
+                    tcg_rarity, tcg_art = await extract_rarity_from_tcgplayer(page_context)
                     
-                    if tcg_rarity and normalize_rarity(tcg_rarity) == normalize_rarity(card_rarity):
-                        logger.info(f"Single variant has correct rarity: {tcg_rarity}")
+                    # Check both rarity and art variant if provided
+                    rarity_matches = tcg_rarity and normalize_rarity(tcg_rarity) == normalize_rarity(card_rarity)
+                    art_matches = not target_art_version or (tcg_art and str(tcg_art).strip() == str(target_art_version).strip())
+                    
+                    if rarity_matches and art_matches:
+                        logger.info(f"Single variant matches criteria - Rarity: {tcg_rarity}, Art: {tcg_art}")
                         return variant['href']
                     else:
-                        logger.warning(f"Single variant has wrong rarity. Found: {tcg_rarity}, Expected: {card_rarity}")
+                        if not rarity_matches:
+                            logger.warning(f"Single variant has wrong rarity. Found: {tcg_rarity}, Expected: {card_rarity}")
+                        if not art_matches:
+                            logger.warning(f"Single variant has wrong art. Found: {tcg_art}, Expected: {target_art_version}")
                         return None
                 finally:
                     await page_context.close()
@@ -671,45 +678,52 @@ async def select_best_card_variant(
             art_matching_variants = []
             for variant in matching_variants:
                 title_lower = variant['title'].lower()
-                art_version_lower = target_art_version.lower()
+                art_version = str(target_art_version).strip().lower()
                 
                 # Check for art variant in title
-                if art_version_lower in title_lower:
+                if art_version in title_lower:
                     art_matching_variants.append(variant)
 
             if art_matching_variants:
                 matching_variants = art_matching_variants
                 logger.info(f"Found {len(matching_variants)} variants matching art variant {target_art_version}")
 
-        # Check each remaining variant's rarity via TCGPlayer
-        if card_rarity:
-            for variant in matching_variants:
-                page_context = await page.context.new_page()
-                try:
-                    logger.info(f"Checking rarity for variant: {variant['title']}")
-                    await page_context.goto(variant['href'], wait_until='networkidle', timeout=15000)
-                    tcg_rarity = await extract_rarity_from_tcgplayer(page_context)
+        # Check each remaining variant's rarity and art variant via TCGPlayer
+        for variant in matching_variants:
+            page_context = await page.context.new_page()
+            try:
+                logger.info(f"Checking rarity for variant: {variant['title']}")
+                await page_context.goto(variant['href'], wait_until='networkidle', timeout=15000)
+                tcg_rarity, tcg_art = await extract_rarity_from_tcgplayer(page_context)
+                
+                if tcg_rarity:
+                    normalized_tcg = normalize_rarity(tcg_rarity)
+                    normalized_requested = normalize_rarity(card_rarity)
                     
-                    if tcg_rarity:
-                        normalized_tcg = normalize_rarity(tcg_rarity)
-                        normalized_requested = normalize_rarity(card_rarity)
-                        
-                        logger.info(f"TCGPlayer rarity: {tcg_rarity} ({normalized_tcg})")
-                        logger.info(f"Requested rarity: {card_rarity} ({normalized_requested})")
-                        
-                        if normalized_tcg == normalized_requested:
-                            logger.info("✓ Found matching rarity from TCGPlayer!")
-                            return variant['href']
-                        else:
-                            logger.info("✗ TCGPlayer rarity does not match")
+                    logger.info(f"TCGPlayer rarity: {tcg_rarity} ({normalized_tcg})")
+                    logger.info(f"Requested rarity: {card_rarity} ({normalized_requested})")
+                    
+                    # Check both rarity and art variant
+                    rarity_matches = normalized_tcg == normalized_requested
+                    art_matches = not target_art_version or (tcg_art and str(tcg_art).strip() == str(target_art_version).strip())
+                    
+                    if rarity_matches and art_matches:
+                        logger.info(f"✓ Found perfect match! Rarity: {tcg_rarity}, Art: {tcg_art}")
+                        return variant['href']
                     else:
-                        logger.info("Could not extract rarity from TCGPlayer")
-                finally:
-                    await page_context.close()
+                        if not rarity_matches:
+                            logger.info("✗ TCGPlayer rarity does not match")
+                        if not art_matches:
+                            logger.info(f"✗ Art variant does not match. Found: {tcg_art}, Expected: {target_art_version}")
+                else:
+                    logger.info("Could not extract rarity from TCGPlayer")
+            finally:
+                await page_context.close()
         
         # If we get here with no match but have variants, return first matching variant
+        # if we weren't able to validate completely
         if matching_variants:
-            logger.warning("No exact rarity match found, using first matching variant")
+            logger.warning("No exact match found, using first matching variant")
             return matching_variants[0]['href']
             
         return None
@@ -1189,8 +1203,9 @@ def debug_art_extraction():
             'error': str(e)
         }), 500
 
-async def extract_rarity_from_tcgplayer(page) -> Optional[str]:
-    """Extract rarity information from TCGPlayer via any TCGPlayer link on the page."""
+async def extract_rarity_from_tcgplayer(page) -> tuple[Optional[str], Optional[str]]:
+    """Extract rarity and art variant information from TCGPlayer via any TCGPlayer link on the page.
+    Returns: Tuple of (rarity, art_variant)"""
     try:
         # Find TCGPlayer link with more comprehensive search
         tcgplayer_link = await page.evaluate("""
@@ -1235,7 +1250,7 @@ async def extract_rarity_from_tcgplayer(page) -> Optional[str]:
         
         if not tcgplayer_link:
             logger.debug("No TCGPlayer link found")
-            return None
+            return None, None
             
         logger.info(f"Found TCGPlayer link: {tcgplayer_link}")
         
@@ -1244,8 +1259,8 @@ async def extract_rarity_from_tcgplayer(page) -> Optional[str]:
         try:
             await tcg_page.goto(tcgplayer_link, wait_until='networkidle', timeout=15000)
             
-            # Extract rarity from TCGPlayer page with multiple attempts
-            rarity = await tcg_page.evaluate("""
+            # Extract rarity and art variant from TCGPlayer page
+            result = await tcg_page.evaluate("""
                 () => {
                     function normalizeRarity(text) {
                         if (!text) return '';
@@ -1254,108 +1269,172 @@ async def extract_rarity_from_tcgplayer(page) -> Optional[str]:
                             .replace(/[-_]/g, ' ')
                             .toLowerCase();
                     }
+
+                    function extractArtVariant(text) {
+                        if (!text) return null;
+                        
+                        // Check for numbered variants
+                        const numberMatches = [
+                            text.match(/\\b(\d+)(?:st|nd|rd|th)?\\s*(?:art|artwork)\\b/i),
+                            text.match(/\\[(\d+)(?:st|nd|rd|th)?\\]/i),
+                            text.match(/\\((\d+)(?:st|nd|rd|th)?\\)/i),
+                            text.match(/\\b(\d+)(?:st|nd|rd|th)?\\b(?=.*?(?:art|artwork))/i)
+                        ];
+                        
+                        for (const match of numberMatches) {
+                            if (match && match[1]) {
+                                console.log('Found numbered art variant:', match[1]);
+                                return match[1];
+                            }
+                        }
+                        
+                        // Check for named variants
+                        const namedMatches = [
+                            text.match(/\\b(arkana|joey\\s*wheeler|kaiba|pharaoh|anime|manga)\\b/i),
+                            text.match(/\\[(.*?(?:art|artwork))\\]/i),
+                            text.match(/\\((.*?(?:art|artwork))\\)/i)
+                        ];
+                        
+                        for (const match of namedMatches) {
+                            if (match && match[1]) {
+                                console.log('Found named art variant:', match[1]);
+                                return match[1];
+                            }
+                        }
+                        
+                        return null;
+                    }
                     
-                    // Try multiple methods to find rarity
+                    let foundRarity = null;
+                    let foundArtVariant = null;
                     
-                    // 1. Look for rarity in product details section
+                    // 1. Look for both in product details section
                     const productDetails = document.querySelector('[class*="product-details"], [class*="card-details"], .details');
                     if (productDetails) {
                         console.log('Found product details section');
                         const detailsText = productDetails.textContent;
+                        
+                        // Check for rarity
                         const rarityMatch = detailsText.match(/Rarity:?\s*([^\\n,]+)/i);
                         if (rarityMatch) {
                             console.log('Found rarity in product details:', rarityMatch[1]);
-                            return rarityMatch[1].trim();
+                            foundRarity = rarityMatch[1].trim();
                         }
+                        
+                        // Check for art variant in details
+                        foundArtVariant = extractArtVariant(detailsText);
                     }
                     
-                    // 2. Check listing titles for rarity
+                    // 2. Check listing titles
                     const listings = Array.from(document.querySelectorAll('[class*="listing"], [class*="product-title"]'));
                     for (const listing of listings) {
                         const text = listing.textContent;
-                        // First check for Quarter Century variants
-                        if (/quarter[-\\s]century\\s+secret\\s+rare/i.test(text)) {
-                            console.log('Found Quarter Century Secret Rare in listing');
-                            return 'Quarter Century Secret Rare';
+                        
+                        // Check for rarity if not found yet
+                        if (!foundRarity) {
+                            if (/quarter[-\\s]century\\s+secret\\s+rare/i.test(text)) {
+                                foundRarity = 'Quarter Century Secret Rare';
+                            } else if (/quarter[-\\s]century\\s+ultra\\s+rare/i.test(text)) {
+                                foundRarity = 'Quarter Century Ultra Rare';
+                            } else if (/secret\\s+rare/i.test(text)) {
+                                foundRarity = 'Secret Rare';
+                            }
                         }
-                        if (/quarter[-\\s]century\\s+ultra\\s+rare/i.test(text)) {
-                            console.log('Found Quarter Century Ultra Rare in listing');
-                            return 'Quarter Century Ultra Rare';
+                        
+                        // Check for art variant if not found yet
+                        if (!foundArtVariant) {
+                            foundArtVariant = extractArtVariant(text);
                         }
-                        // Then check other rarities
-                        if (/secret\\s+rare/i.test(text)) {
-                            console.log('Found Secret Rare in listing');
-                            return 'Secret Rare';
-                        }
-                        // ... add other rarity checks as needed
+                        
+                        if (foundRarity && foundArtVariant) break;
                     }
                     
                     // 3. Check page heading/title
                     const heading = document.querySelector('h1');
                     if (heading) {
                         const text = heading.textContent;
-                        const rarityMatch = text.match(/\\[(.*?rare.*?)\\]/i);
-                        if (rarityMatch) {
-                            console.log('Found rarity in heading:', rarityMatch[1]);
-                            return rarityMatch[1].trim();
+                        
+                        // Check for rarity if not found
+                        if (!foundRarity) {
+                            const rarityMatch = text.match(/\\[(.*?rare.*?)\\]/i);
+                            if (rarityMatch) {
+                                foundRarity = rarityMatch[1].trim();
+                            }
+                        }
+                        
+                        // Check for art variant if not found
+                        if (!foundArtVariant) {
+                            foundArtVariant = extractArtVariant(text);
                         }
                     }
                     
-                    // 4. Look for rarity in structured data
+                    // 4. Check structured data
                     const scriptTags = Array.from(document.querySelectorAll('script[type="application/ld+json"]'));
                     for (const script of scriptTags) {
                         try {
                             const data = JSON.parse(script.textContent);
-                            if (data.rarity) {
-                                console.log('Found rarity in structured data:', data.rarity);
-                                return data.rarity;
+                            if (data.rarity && !foundRarity) {
+                                foundRarity = data.rarity;
+                            }
+                            // Some sites include variant info in structured data
+                            if (data.description && !foundArtVariant) {
+                                foundArtVariant = extractArtVariant(data.description);
                             }
                         } catch (e) {
                             // Ignore parsing errors
                         }
                     }
                     
-                    // 5. Search entire page for rarity patterns
-                    const pageText = document.body.textContent;
-                    const rarityPatterns = [
-                        /quarter[-\\s]century\\s+secret\\s+rare/i,
-                        /quarter[-\\s]century\\s+ultra\\s+rare/i,
-                        /secret\\s+rare/i,
-                        /ultra\\s+rare/i,
-                        /super\\s+rare/i,
-                        /rare/i,
-                        /common/i
-                    ];
-                    
-                    for (const pattern of rarityPatterns) {
-                        const match = pageText.match(pattern);
-                        if (match) {
-                            console.log('Found rarity in page text:', match[0]);
-                            return match[0].trim();
+                    // 5. Search entire page content as last resort
+                    if (!foundRarity || !foundArtVariant) {
+                        const pageText = document.body.textContent;
+                        
+                        if (!foundRarity) {
+                            const rarityPatterns = [
+                                /quarter[-\\s]century\\s+secret\\s+rare/i,
+                                /quarter[-\\s]century\\s+ultra\\s+rare/i,
+                                /secret\\s+rare/i,
+                                /ultra\\s+rare/i,
+                                /super\\s+rare/i,
+                                /rare/i,
+                                /common/i
+                            ];
+                            
+                            for (const pattern of rarityPatterns) {
+                                const match = pageText.match(pattern);
+                                if (match) {
+                                    foundRarity = match[0].trim();
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if (!foundArtVariant) {
+                            foundArtVariant = extractArtVariant(pageText);
                         }
                     }
                     
-                    console.log('No rarity found with any method');
-                    return null;
+                    console.log('Final results:', { rarity: foundRarity, artVariant: foundArtVariant });
+                    return { rarity: foundRarity, artVariant: foundArtVariant };
                 }
             """)
             
+            rarity = result.get('rarity')
+            art_variant = result.get('artVariant')
+            
             if rarity:
                 logger.info(f"Extracted rarity from TCGPlayer: {rarity}")
-                return rarity.strip()
-            else:
-                logger.debug("No rarity found on TCGPlayer page")
-                # Log the page content for debugging
-                page_content = await tcg_page.content()
-                logger.debug(f"TCGPlayer page content: {page_content[:1000]}...")
-                return None
+            if art_variant:
+                logger.info(f"Extracted art variant from TCGPlayer: {art_variant}")
+            
+            return rarity.strip() if rarity else None, art_variant.strip() if art_variant else None
                 
         finally:
             await tcg_page.close()
             
     except Exception as e:
-        logger.error(f"Error extracting rarity from TCGPlayer: {e}")
-        return None
+        logger.error(f"Error extracting data from TCGPlayer: {e}")
+        return None, None
 
 @app.route('/card-sets', methods=['GET'])
 def get_all_card_sets():
