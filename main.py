@@ -39,8 +39,8 @@ def get_mongo_client():
             MONGODB_CONNECTION_STRING,
             ssl=True,
             tlsAllowInvalidCertificates=True,
-            connectTimeoutMS=30000,
-            serverSelectionTimeoutMS=30000,
+            connectTimeoutMS=60000,
+            serverSelectionTimeoutMS=60000,
             retryWrites=True,
             w='majority'
         )
@@ -58,7 +58,7 @@ def get_mongo_client():
                 MONGODB_CONNECTION_STRING,
                 tls=True,
                 tlsAllowInvalidCertificates=True,
-                serverSelectionTimeoutMS=30000,
+                serverSelectionTimeoutMS=60000,
                 retryWrites=True
             )
             client.admin.command('ping')
@@ -143,8 +143,8 @@ def initialize_sync_price_scraping():
                 MONGODB_CONNECTION_STRING,
                 ssl=True,
                 tlsAllowInvalidCertificates=True,
-                connectTimeoutMS=30000,
-                serverSelectionTimeoutMS=30000,
+                connectTimeoutMS=60000,
+                serverSelectionTimeoutMS=60000,
                 retryWrites=True,
                 w='majority'
             )
@@ -844,7 +844,7 @@ async def scrape_price_from_pricecharting(
             search_url = f"https://www.pricecharting.com/search-products?q={quote(search_query)}&type=prices"
             
             logger.info(f"Searching PriceCharting for: {search_query}")
-            await page.goto(search_url, wait_until='networkidle', timeout=30000)
+            await page.goto(search_url, wait_until='networkidle', timeout=60000)
             
             # Check if we landed directly on a product page
             is_product_page = await page.evaluate("() => document.getElementById('product_name') !== null")
@@ -857,7 +857,7 @@ async def scrape_price_from_pricecharting(
                 
                 if best_variant_url:
                     logger.info(f"Selected best variant: {best_variant_url}")
-                    await page.goto(best_variant_url, wait_until='networkidle', timeout=30000)
+                    await page.goto(best_variant_url, wait_until='networkidle', timeout=60000)
                 else:
                     logger.warning(f"No suitable variant found for {card_number}")
                     await browser.close()
