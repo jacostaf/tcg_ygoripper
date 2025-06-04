@@ -299,161 +299,61 @@ def find_cached_price_data_sync(
     try:
         logger.info(f"🔍 CACHE LOOKUP: card_number={card_number}, rarity={card_rarity}, art_variant={art_variant}")
         
-        # Normalize art variant for consistent matching
-        normalized_art_variant = None
+        # Define projection to exclude _id field
+        projection = {
+            "_id": 0,  # Explicitly exclude _id field
+            "card_number": 1,
+            "card_name": 1,
+            "card_art_variant": 1,
+            "card_rarity": 1,
+            "booster_set_name": 1,
+            "set_code": 1,
+            "tcg_price": 1,
+            "pc_ungraded_price": 1,
+            "pc_grade7": 1,
+            "pc_grade8": 1,
+            "pc_grade9": 1,
+            "pc_grade9_5": 1,
+            "pc_grade10": 1,
+            "source_url": 1,
+            "scrape_success": 1,
+            "last_price_updt": 1,
+            "error_message": 1
+        }
+        
+        # Build query based on art variant
         if art_variant and art_variant.strip():
-            # Handle both numbered and named art variants
-            if art_variant.isdigit() or any(suffix in art_variant.lower() for suffix in ['st', 'nd', 'rd', 'th']):
-                # Numbered art variant - remove ordinal suffixes for normalization
-                normalized_art_variant = re.sub(r'(st|nd|rd|th)$', '', art_variant.lower().strip())
-            else:
-                # Named art variant - normalize case and spacing
-                normalized_art_variant = art_variant.lower().strip()
-            
-            logger.info(f"  Normalized art variant: '{art_variant}' -> '{normalized_art_variant}'")
-        
-        # Build precise cache queries that ENFORCE art variant matching
-        queries_to_try = []
-        
-        # When art variant is specified, ALL queries must include it as a requirement
-        if normalized_art_variant:
-            logger.info("  🎯 ART VARIANT SPECIFIED - Building art-specific queries only")
-            
-            # Query 1: Exact match (card_number + rarity + art_variant)
-            if card_rarity and card_rarity.strip():
-                if art_variant.isdigit() or any(suffix in art_variant.lower() for suffix in ['st', 'nd', 'rd', 'th']):
-                    # Numbered art variant - use regex for flexible matching
-                    exact_query = {
-                        "card_number": card_number,
-                        "card_rarity": {"$regex": re.escape(card_rarity.strip()), "$options": "i"},
-                        "$or": [
-                            {"card_art_variant": {"$regex": f"^{re.escape(normalized_art_variant)}(st|nd|rd|th)?$", "$options": "i"}},
-                            {"card_art_variant": art_variant.strip()}  # Also try exact match
-                        ]
-                    }
-                else:
-                    # Named art variant - use case-insensitive matching
-                    exact_query = {
-                        "card_number": card_number,
-                        "card_rarity": {"$regex": re.escape(card_rarity.strip()), "$options": "i"},
-                        "$or": [
-                            {"card_art_variant": {"$regex": f"^{re.escape(normalized_art_variant)}$", "$options": "i"}},
-                            {"card_art_variant": art_variant.strip()},  # Exact match
-                            # Also search in card name and URL for named variants
-                            {"card_name": {"$regex": re.escape(art_variant.strip()), "$options": "i"}},
-                            {"source_url": {"$regex": re.escape(art_variant.strip().lower()), "$options": "i"}}
-                        ]
-                    }
-                queries_to_try.append(("art_rarity_exact", exact_query))
-            
-            # Query 2: Card number + art variant only (fallback if rarity doesn't match)
-            if art_variant.isdigit() or any(suffix in art_variant.lower() for suffix in ['st', 'nd', 'rd', 'th']):
-                # Numbered art variant
-                art_only_query = {
-                    "card_number": card_number,
-                    "$or": [
-                        {"card_art_variant": {"$regex": f"^{re.escape(normalized_art_variant)}(st|nd|rd|th)?$", "$options": "i"}},
-                        {"card_art_variant": art_variant.strip()}  # Also try exact match
-                    ]
-                }
-            else:
-                # Named art variant
-                art_only_query = {
-                    "card_number": card_number,
-                    "$or": [
-                        {"card_art_variant": {"$regex": f"^{re.escape(normalized_art_variant)}$", "$options": "i"}},
-                        {"card_art_variant": art_variant.strip()},
-                        # Also search in card name and URL for named variants
-                        {"card_name": {"$regex": re.escape(art_variant.strip()), "$options": "i"}},
-                        {"source_url": {"$regex": re.escape(art_variant.strip().lower()), "$options": "i"}}
-                    ]
-                }
-            queries_to_try.append(("art_only", art_only_query))
-        
-        else:
-            logger.info("  📋 NO ART VARIANT SPECIFIED - Building general queries")
-            
-            # When no art variant specified, use the original logic
-            # Query 1: Card number + rarity (prefer entries without art variants for base cards)
-            if card_rarity and card_rarity.strip():
-                rarity_query = {
-                    "card_number": card_number,
-                    "card_rarity": {"$regex": re.escape(card_rarity.strip()), "$options": "i"},
-                    "$or": [
-                        {"card_art_variant": {"$exists": False}},  # Prefer entries without art variants
-                        {"card_art_variant": None},
-                        {"card_art_variant": ""}
-                    ]
-                }
-                queries_to_try.append(("rarity_no_art", rarity_query))
-            
-            # Query 2: Card number only (fallback)
-            card_only_query = {
+            normalized_art = re.sub(r'(st|nd|rd|th)$', '', art_variant.lower().strip())
+            query = {
                 "card_number": card_number,
-                "$or": [
-                    {"card_art_variant": {"$exists": False}},  # Prefer entries without art variants
-                    {"card_art_variant": None},
-                    {"card_art_variant": ""}
-                ]
+                "card_rarity": {"$regex": re.escape(card_rarity), "$options": "i"},
+                "card_art_variant": {"$regex": f"^{re.escape(normalized_art)}(st|nd|rd|th)?$", "$options": "i"}
             }
-            queries_to_try.append(("card_only_no_art", card_only_query))
+        else:
+            query = {
+                "card_number": card_number,
+                "card_rarity": {"$regex": re.escape(card_rarity), "$options": "i"}
+            }
         
-        # Try each query until we find a valid match
-        for query_name, query in queries_to_try:
-            logger.info(f"  🔎 Trying {query_name} query: {query}")
-            
-            # Find all matching documents and sort by most recent
-            documents = list(sync_price_scraping_collection.find(
-                query,
-                sort=[("last_price_updt", -1)]
-            ).limit(5))  # Get top 5 most recent matches
-            
-            logger.info(f"  📊 Found {len(documents)} document(s) for {query_name}")
-            
-            for i, document in enumerate(documents):
-                logger.info(f"  🔍 Validating document {i+1}:")
-                logger.info(f"    - Stored art variant: '{document.get('card_art_variant', 'None')}'")
-                logger.info(f"    - Card name: '{document.get('card_name', '')[:60]}...'")
-                logger.info(f"    - Source URL: '{document.get('source_url', '')}'")
-                
-                # STRICT VALIDATION: Ensure the cached data matches the request
-                if normalized_art_variant:
-                    cached_art_variant = document.get('card_art_variant', '')
-                    cached_card_name = document.get('card_name', '')
-                    cached_source_url = document.get('source_url', '')
-                    
-                    # Extract actual art variant from cached data
-                    actual_art_from_name = extract_art_version(cached_card_name)
-                    actual_art_from_url = extract_art_version(cached_source_url)
-                    stored_art_variant = cached_art_variant
-                    
-                    # Use the most reliable source for actual art variant
-                    actual_art_variant = actual_art_from_name or actual_art_from_url or stored_art_variant
-                    
-                    if actual_art_variant:
-                        # Normalize for comparison
-                        actual_clean = re.sub(r'(st|nd|rd|th)$', '', str(actual_art_variant).lower().strip())
-                        
-                        if normalized_art_variant == actual_clean:
-                            logger.info(f"    ✅ ART VALIDATION PASSED: '{art_variant}' matches '{actual_art_variant}'")
-                            return _check_freshness_and_return(document)
-                        else:
-                            logger.warning(f"    ❌ ART VALIDATION FAILED: '{art_variant}' != '{actual_art_variant}'")
-                            continue  # Try next document
-                    else:
-                        logger.warning(f"    ⚠️  Could not extract art variant from cached data")
-                        continue  # Try next document
-                else:
-                    # No art variant requested - make sure cached entry doesn't have one either
-                    cached_art_variant = document.get('card_art_variant', '')
-                    if cached_art_variant and cached_art_variant.strip():
-                        logger.warning(f"    ❌ Found art variant '{cached_art_variant}' but none was requested, skipping")
-                        continue  # Skip entries with art variants when none requested
-                    else:
-                        logger.info(f"    ✅ NO ART VALIDATION: No art variant in request or cache")
-                        return _check_freshness_and_return(document)
+        # Find documents with projection and sort
+        documents = list(sync_price_scraping_collection.find(
+            query,
+            projection=projection,
+            sort=[("last_price_updt", -1)]
+        ).limit(5))
         
-        logger.info("  ❌ No valid cached data found for any query")
+        # Process and return the first valid document
+        for doc in documents:
+            # Convert last_price_updt to proper format
+            if 'last_price_updt' in doc:
+                last_update = doc['last_price_updt']
+                if isinstance(last_update, datetime):
+                    doc['last_price_updt'] = last_update.strftime("%a, %d %b %Y %H:%M:%S GMT")
+                elif isinstance(last_update, str):
+                    # Keep string format if it's already a string
+                    pass
+            return _check_freshness_and_return(doc)
+        
         return False, None
         
     except Exception as e:
@@ -465,34 +365,37 @@ def _check_freshness_and_return(document) -> tuple[bool, Optional[Dict]]:
     try:
         # Check if data is fresh (within expiry period)
         expiry_date = datetime.now(UTC) - timedelta(days=CACHE_EXPIRY_DAYS)
-        last_update = document.get('last_price_updt', datetime.min.replace(tzinfo=UTC))
         
-        # Handle different date formats
+        # Get last update time
+        last_update = document.get('last_price_updt')
+        
+        # Convert last_update to datetime if it's a string
         if isinstance(last_update, str):
             try:
                 # Try ISO format first
                 last_update = datetime.fromisoformat(last_update.replace('Z', '+00:00'))
             except ValueError:
                 try:
-                    # Try RFC format (e.g., "Tue, 03 Jun 2025 03:49:48 GMT")
+                    # Try RFC format
                     last_update = datetime.strptime(last_update, "%a, %d %b %Y %H:%M:%S GMT")
-                    last_update = last_update.replace(tzinfo=UTC)
                 except ValueError:
                     logger.error(f"Could not parse date string: {last_update}")
                     last_update = datetime.min.replace(tzinfo=UTC)
-        
-        # Ensure timezone awareness
-        if last_update.tzinfo is None:
-            last_update = last_update.replace(tzinfo=UTC)
+        elif isinstance(last_update, datetime):
+            if last_update.tzinfo is None:
+                last_update = last_update.replace(tzinfo=UTC)
+        else:
+            last_update = datetime.min.replace(tzinfo=UTC)
         
         is_fresh = last_update > expiry_date
         
         if is_fresh:
             logger.info(f"  ✅ Found FRESH cached data (updated: {last_update})")
-            # Ensure the document has a properly formatted date before returning
-            document['last_price_updt'] = last_update
         else:
             logger.info(f"  ⚠️  Found STALE cached data (updated: {last_update}, expired: {expiry_date})")
+        
+        # Format the date as RFC string for JSON serialization
+        document['last_price_updt'] = last_update.strftime("%a, %d %b %Y %H:%M:%S GMT")
         
         return is_fresh, document
         
