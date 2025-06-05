@@ -648,9 +648,9 @@ async def select_best_card_variant(
                     await page_context.goto(variant['href'], wait_until='networkidle', timeout=15000)
                     tcg_rarity, tcg_art = await extract_rarity_from_tcgplayer(page_context)
                     
-                    # Check both rarity and art variant if provided
-                    rarity_matches = tcg_rarity and normalize_rarity(tcg_rarity) == normalize_rarity(card_rarity)
-                    art_matches = not target_art_version or (tcg_art and str(tcg_art).strip() == str(target_art_version).strip())
+                    # Check both rarity and art variant if provided (case-insensitive)
+                    rarity_matches = tcg_rarity and normalize_rarity(tcg_rarity).lower() == normalize_rarity(card_rarity).lower()
+                    art_matches = not target_art_version or (tcg_art and str(tcg_art).strip().lower() == str(target_art_version).strip().lower())
                     
                     if rarity_matches and art_matches:
                         logger.info(f"Single variant matches criteria - Rarity: {tcg_rarity}, Art: {tcg_art}")
@@ -700,15 +700,15 @@ async def select_best_card_variant(
                 tcg_rarity, tcg_art = await extract_rarity_from_tcgplayer(page_context)
                 
                 if tcg_rarity:
-                    normalized_tcg = normalize_rarity(tcg_rarity)
-                    normalized_requested = normalize_rarity(card_rarity)
+                    normalized_tcg = normalize_rarity(tcg_rarity).lower()
+                    normalized_requested = normalize_rarity(card_rarity).lower()
                     
-                    logger.info(f"TCGPlayer rarity: {tcg_rarity} ({normalized_tcg})")
-                    logger.info(f"Requested rarity: {card_rarity} ({normalized_requested})")
+                    logger.info(f"TCGPlayer rarity: {tcg_rarity} (normalized: {normalized_tcg})")
+                    logger.info(f"Requested rarity: {card_rarity} (normalized: {normalized_requested})")
                     
-                    # Check both rarity and art variant
+                    # Check both rarity and art variant (case-insensitive)
                     rarity_matches = normalized_tcg == normalized_requested
-                    art_matches = not target_art_version or (tcg_art and str(tcg_art).strip() == str(target_art_version).strip())
+                    art_matches = not target_art_version or (tcg_art and str(tcg_art).strip().lower() == str(target_art_version).strip().lower())
                     
                     if rarity_matches and art_matches:
                         logger.info(f"✓ Found perfect match! Rarity: {tcg_rarity}, Art: {tcg_art}")
