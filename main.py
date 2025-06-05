@@ -1265,26 +1265,159 @@ async def extract_rarity_from_tcgplayer(page) -> tuple[Optional[str], Optional[s
         try:
             await tcg_page.goto(tcgplayer_link, wait_until='networkidle', timeout=15000)
             
-            # Extract rarity and art variant from TCGPlayer page
+            # Extract rarity and art variant from TCGPlayer page with improved extraction
             result = await tcg_page.evaluate("""
                 () => {
-                    function normalizeRarity(text) {
+                    function cleanExtractedRarity(text) {
                         if (!text) return '';
-                        return text.trim()
-                            .replace(/\\s+/g, ' ')
-                            .replace(/[-_]/g, ' ')
-                            .toLowerCase();
+                        
+                        // Comprehensive rarity patterns in order of specificity (most specific first)
+                        const rarityPatterns = [
+                            // Quarter Century variants
+                            /quarter[\\s-]century\\s+secret\\s+rare/i,
+                            /25th\\s+anniversary\\s+secret\\s+rare/i,
+                            /quarter[\\s-]century\\s+ultra\\s+rare/i,
+                            /quarter[\\s-]century\\s+rare/i,
+                            
+                            // Platinum and special secret variants
+                            /platinum\\s+secret\\s+rare/i,
+                            /prismatic\\s+secret\\s+rare/i,
+                            /ultra\\s+secret\\s+rare/i,
+                            /secret\\s+ultra\\s+rare/i,
+                            
+                            // Starlight and Ghost rarities
+                            /starlight\\s+rare/i,
+                            /ghost\\s+rare/i,
+                            
+                            // Parallel variants
+                            /super\\s+parallel\\s+rare/i,
+                            /ultra\\s+parallel\\s+rare/i,
+                            /parallel\\s+rare/i,
+                            /parallel\\s+common/i,
+                            
+                            // Collector's and special rarities
+                            /collector'?s\\s+rare/i,
+                            /millennium\\s+rare/i,
+                            /starfoil\\s+rare/i,
+                            /holofoil\\s+rare/i,
+                            
+                            // Gold variants
+                            /gold\\s+ultra\\s+rare/i,
+                            /gold\\s+rare/i,
+                            
+                            // Pharaoh's variants
+                            /pharaoh'?s\\s+rare/i,
+                            /ultra\\s+rare\\s*\\(\\s*pharaoh'?s\\s+rare\\s*\\)/i,
+                            
+                            // Standard rarities
+                            /ultimate\\s+rare/i,
+                            /secret\\s+rare/i,
+                            /ultra\\s+rare/i,
+                            /super\\s+rare/i,
+                            
+                            // Short print variants
+                            /super\\s+short\\s+print\\s+common/i,
+                            /short\\s+print\\s+common/i,
+                            /normal\\s+common/i,
+                            
+                            // Basic rarities (must be last)
+                            /\\brare\\b/i,
+                            /\\bcommon\\b/i,
+                            /\\buncommon\\b/i
+                        ];
+                        
+                        // Try to match a complete rarity pattern first
+                        for (const pattern of rarityPatterns) {
+                            const match = text.match(pattern);
+                            if (match) {
+                                console.log('Found complete rarity pattern:', match[0]);
+                                return match[0].trim();
+                            }
+                        }
+                        
+                        // If no complete pattern found, try to extract up to rarity boundary
+                        const lowerText = text.toLowerCase();
+                        
+                        // Define all possible rarity ending words
+                        const rarityEndings = [
+                            'rare', 'common', 'uncommon'
+                        ];
+                        
+                        for (const ending of rarityEndings) {
+                            const index = lowerText.indexOf(ending);
+                            if (index !== -1) {
+                                // Find the end position of the rarity word
+                                const endIndex = index + ending.length;
+                                
+                                // Check if this is a word boundary (not part of a larger word)
+                                const isWordBoundary = (
+                                    endIndex >= lowerText.length ||
+                                    /[\\s\\n\\r\\t.,;:!?()[\\]{}|"'`~@#$%^&*+=<>\\/\\\\-]/.test(lowerText[endIndex])
+                                );
+                                
+                                if (isWordBoundary) {
+                                    // Extract text up to the end of the rarity word
+                                    let extracted = text.substring(0, endIndex).trim();
+                                    
+                                    // Clean up extracted text by working backwards to find rarity start
+                                    const words = extracted.split(/\\s+/);
+                                    
+                                    // If we have too many words, try to find where the rarity actually starts
+                                    if (words.length > 5) {
+                                        const rarityKeywords = [
+                                            'quarter', 'century', '25th', 'anniversary',
+                                            'platinum', 'prismatic', 'starlight', 'ghost',
+                                            'parallel', 'collector', 'millennium', 'starfoil',
+                                            'holofoil', 'gold', 'pharaoh', 'ultimate',
+                                            'secret', 'ultra', 'super', 'short', 'print',
+                                            'normal'
+                                        ];
+                                        
+                                        // Find the start of rarity-related words
+                                        let rarityStart = -1;
+                                        for (let i = words.length - 1; i >= 0; i--) {
+                                            const word = words[i].toLowerCase().replace(/[^\\w]/g, '');
+                                            if (rarityKeywords.includes(word)) {
+                                                rarityStart = i;
+                                            } else if (rarityStart !== -1) {
+                                                // Stop if we found rarity words but hit a non-rarity word
+                                                break;
+                                            }
+                                        }
+                                        
+                                        if (rarityStart !== -1) {
+                                            extracted = words.slice(rarityStart).join(' ');
+                                        } else {
+                                            // Fallback: take last 4 words
+                                            extracted = words.slice(-4).join(' ');
+                                        }
+                                    }
+                                    
+                                    // Final validation - reject if still too long or contains non-rarity words
+                                    if (extracted.length > 60) {
+                                        console.log('Extracted rarity too long, truncating:', extracted.substring(0, 60));
+                                        extracted = extracted.substring(0, 60);
+                                    }
+                                    
+                                    return extracted;
+                                }
+                            }
+                        }
+                        
+                        // Fallback: return first 50 characters if no rarity ending found
+                        console.log('No rarity boundary found, using fallback');
+                        return text.substring(0, 50).trim();
                     }
 
                     function extractArtVariant(text) {
                         if (!text) return null;
                         
-                        // Check for numbered variants
+                        // Check for numbered variants first
                         const numberMatches = [
-                            text.match(/\\b(\d+)(?:st|nd|rd|th)?\\s*(?:art|artwork)\\b/i),
-                            text.match(/\\[(\d+)(?:st|nd|rd|th)?\\]/i),
-                            text.match(/\\((\d+)(?:st|nd|rd|th)?\\)/i),
-                            text.match(/\\b(\d+)(?:st|nd|rd|th)?\\b(?=.*?(?:art|artwork))/i)
+                            text.match(/\\b(\\d+)(?:st|nd|rd|th)?\\s*(?:art|artwork)\\b/i),
+                            text.match(/\\[(\\d+)(?:st|nd|rd|th)?\\]/i),
+                            text.match(/\\((\\d+)(?:st|nd|rd|th)?\\)/i),
+                            text.match(/\\b(\\d+)(?:st|nd|rd|th)?\\b(?=.*?(?:art|artwork))/i)
                         ];
                         
                         for (const match of numberMatches) {
@@ -1314,113 +1447,100 @@ async def extract_rarity_from_tcgplayer(page) -> tuple[Optional[str], Optional[s
                     let foundRarity = null;
                     let foundArtVariant = null;
                     
-                    // 1. Look for both in product details section
+                    // 1. Look for both in product details section first
                     const productDetails = document.querySelector('[class*="product-details"], [class*="card-details"], .details');
                     if (productDetails) {
                         console.log('Found product details section');
                         const detailsText = productDetails.textContent;
                         
-                        // Check for rarity
-                        const rarityMatch = detailsText.match(/Rarity:?\s*([^\\n,]+)/i);
+                        // Check for rarity in details
+                        const rarityMatch = detailsText.match(/Rarity:?\\s*([^\\n,]+)/i);
                         if (rarityMatch) {
                             console.log('Found rarity in product details:', rarityMatch[1]);
-                            foundRarity = rarityMatch[1].trim();
+                            foundRarity = cleanExtractedRarity(rarityMatch[1]);
                         }
                         
                         // Check for art variant in details
                         foundArtVariant = extractArtVariant(detailsText);
                     }
                     
-                    // 2. Check listing titles
-                    const listings = Array.from(document.querySelectorAll('[class*="listing"], [class*="product-title"]'));
-                    for (const listing of listings) {
-                        const text = listing.textContent;
-                        
-                        // Check for rarity if not found yet
-                        if (!foundRarity) {
-                            if (/quarter[-\\s]century\\s+secret\\s+rare/i.test(text)) {
-                                foundRarity = 'Quarter Century Secret Rare';
-                            } else if (/quarter[-\\s]century\\s+ultra\\s+rare/i.test(text)) {
-                                foundRarity = 'Quarter Century Ultra Rare';
-                            } else if (/secret\\s+rare/i.test(text)) {
-                                foundRarity = 'Secret Rare';
-                            }
-                        }
-                        
-                        // Check for art variant if not found yet
-                        if (!foundArtVariant) {
-                            foundArtVariant = extractArtVariant(text);
-                        }
-                        
-                        if (foundRarity && foundArtVariant) break;
-                    }
-                    
-                    // 3. Check page heading/title
-                    const heading = document.querySelector('h1');
-                    if (heading) {
-                        const text = heading.textContent;
-                        
-                        // Check for rarity if not found
-                        if (!foundRarity) {
-                            const rarityMatch = text.match(/\\[(.*?rare.*?)\\]/i);
-                            if (rarityMatch) {
-                                foundRarity = rarityMatch[1].trim();
-                            }
-                        }
-                        
-                        // Check for art variant if not found
-                        if (!foundArtVariant) {
-                            foundArtVariant = extractArtVariant(text);
-                        }
-                    }
-                    
-                    // 4. Check structured data
-                    const scriptTags = Array.from(document.querySelectorAll('script[type="application/ld+json"]'));
-                    for (const script of scriptTags) {
-                        try {
-                            const data = JSON.parse(script.textContent);
-                            if (data.rarity && !foundRarity) {
-                                foundRarity = data.rarity;
-                            }
-                            // Some sites include variant info in structured data
-                            if (data.description && !foundArtVariant) {
-                                foundArtVariant = extractArtVariant(data.description);
-                            }
-                        } catch (e) {
-                            // Ignore parsing errors
-                        }
-                    }
-                    
-                    // 5. Search entire page content as last resort
+                    // 2. Check page heading/title if not found
                     if (!foundRarity || !foundArtVariant) {
-                        const pageText = document.body.textContent;
-                        
-                        if (!foundRarity) {
-                            const rarityPatterns = [
-                                /quarter[-\\s]century\\s+secret\\s+rare/i,
-                                /quarter[-\\s]century\\s+ultra\\s+rare/i,
-                                /secret\\s+rare/i,
-                                /ultra\\s+rare/i,
-                                /super\\s+rare/i,
-                                /rare/i,
-                                /common/i
-                            ];
+                        const heading = document.querySelector('h1');
+                        if (heading) {
+                            const text = heading.textContent;
                             
-                            for (const pattern of rarityPatterns) {
-                                const match = pageText.match(pattern);
-                                if (match) {
-                                    foundRarity = match[0].trim();
-                                    break;
+                            // Check for rarity if not found
+                            if (!foundRarity) {
+                                // First try to find rarity in square brackets
+                                const rarityInBrackets = text.match(/\\[(.*?(?:rare|common).*?)\\]/i);
+                                if (rarityInBrackets) {
+                                    foundRarity = cleanExtractedRarity(rarityInBrackets[1]);
+                                } else {
+                                    // Try to extract rarity from entire title
+                                    foundRarity = cleanExtractedRarity(text);
                                 }
                             }
-                        }
-                        
-                        if (!foundArtVariant) {
-                            foundArtVariant = extractArtVariant(pageText);
+                            
+                            // Check for art variant if not found
+                            if (!foundArtVariant) {
+                                foundArtVariant = extractArtVariant(text);
+                            }
                         }
                     }
                     
-                    console.log('Final results:', { rarity: foundRarity, artVariant: foundArtVariant });
+                    // 3. Check listing titles if still not found (only first 3 to avoid noise)
+                    if (!foundRarity || !foundArtVariant) {
+                        const listings = Array.from(document.querySelectorAll('[class*="listing"], [class*="product-title"]'));
+                        for (const listing of listings.slice(0, 3)) {
+                            const text = listing.textContent;
+                            
+                            // Check for rarity if not found yet
+                            if (!foundRarity) {
+                                const extractedRarity = cleanExtractedRarity(text);
+                                // Only accept if it's reasonable length
+                                if (extractedRarity && extractedRarity.length <= 60) {
+                                    foundRarity = extractedRarity;
+                                }
+                            }
+                            
+                            // Check for art variant if not found yet
+                            if (!foundArtVariant) {
+                                foundArtVariant = extractArtVariant(text);
+                            }
+                            
+                            if (foundRarity && foundArtVariant) break;
+                        }
+                    }
+                    
+                    // Final cleanup and validation
+                    if (foundRarity) {
+                        // Ensure the rarity is properly cleaned
+                        foundRarity = cleanExtractedRarity(foundRarity);
+                        
+                        // Additional validation - reject if contains obvious non-rarity content
+                        const invalidPatterns = [
+                            /attribute/i, /monster/i, /type/i, /level/i, /attack/i, /defense/i,
+                            /\\$\\d+/i, /price/i, /market/i, /listing/i, /seller/i, /condition/i,
+                            /near\\s+mint/i, /lightly\\s+played/i
+                        ];
+                        
+                        for (const pattern of invalidPatterns) {
+                            if (pattern.test(foundRarity)) {
+                                console.log('Rejecting rarity due to invalid content:', foundRarity);
+                                foundRarity = null;
+                                break;
+                            }
+                        }
+                        
+                        // Final length check
+                        if (foundRarity && foundRarity.length > 60) {
+                            console.log('Final rarity too long, rejecting:', foundRarity);
+                            foundRarity = null;
+                        }
+                    }
+                    
+                    console.log('Final extraction results:', { rarity: foundRarity, artVariant: foundArtVariant });
                     return { rarity: foundRarity, artVariant: foundArtVariant };
                 }
             """)
@@ -1858,6 +1978,7 @@ def fetch_all_cards_from_sets():
         logger.info(f"Completed processing all sets. Found {processing_stats['total_cards_found']} total cards")
         
         return jsonify({
+
             "success": True,
             "message": "Successfully fetched cards from all sets",
             "data": all_cards_data,
@@ -1869,6 +1990,7 @@ def fetch_all_cards_from_sets():
         return jsonify({
             "success": False,
             "error": "Internal server error during card fetching"
+       
         }), 500
 
 @app.route('/card-sets/<string:set_name>/cards', methods=['GET'])
