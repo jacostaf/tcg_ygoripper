@@ -916,7 +916,9 @@ async def scrape_price_from_pricecharting(
                 
                 if tcg_rarity:
                     detected_rarity = tcg_rarity
-                    detected_art = tcg_art
+                    # Only use TCGPlayer art variant if art_variant was provided in payload
+                    if art_variant and len(art_variant.strip()) > 0 and tcg_art:
+                        detected_art = tcg_art
                 else:
                     # Fallback to checking page title for rarity
                     rarity_variants = normalize_rarity_for_matching(card_rarity)
@@ -1982,7 +1984,6 @@ def get_cards_from_specific_set(set_name):
                         "set_code": set_code,
                         "set_code_prefix": set_code.split('-')[0] if '-' in set_code else set_code
                     }
-            
             logger.info(f"Returning {len(filtered_cards)} filtered cards from {set_name}")
             
             response_data = {
