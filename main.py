@@ -1845,6 +1845,193 @@ def get_card_sets_count():
             "error": "Failed to get card sets count"
         }), 500
 
+def filter_cards_by_set(cards_list: List[Dict], target_set_name: str) -> List[Dict]:
+    """
+    Filter cards to only include variants from the target set.
+    
+    Args:
+        cards_list: List of card dictionaries from YGO API
+        target_set_name: Name of the set to filter by
+        
+    Returns:
+        List of filtered card dictionaries with only relevant set variants
+    """
+    if not cards_list or not target_set_name:
+        return cards_list
+    
+    filtered_cards = []
+    target_set_name_lower = target_set_name.lower().strip()
+    
+    for card in cards_list:
+        # Create a copy of the card to avoid modifying the original
+        filtered_card = card.copy()
+        
+        # Filter the card_sets array to only include the target set
+        if 'card_sets' in card and isinstance(card['card_sets'], list):
+            filtered_sets = []
+            
+            for card_set in card['card_sets']:
+                set_name = card_set.get('set_name', '').lower().strip()
+                
+                # Check if this set matches the target set
+                if set_name == target_set_name_lower:
+                    filtered_sets.append(card_set)
+            
+            # Only include the card if it has variants in the target set
+            if filtered_sets:
+                filtered_card['card_sets'] = filtered_sets
+                
+                # Update card images to match the number of variants in the target set
+                if 'card_images' in filtered_card and len(filtered_sets) < len(filtered_card['card_images']):
+                    # Keep only as many images as we have set variants
+                    filtered_card['card_images'] = filtered_card['card_images'][:len(filtered_sets)]
+                
+                # Add set-specific metadata
+                filtered_card['target_set_variants'] = len(filtered_sets)
+                filtered_card['target_set_name'] = target_set_name
+                
+                # Extract set codes for easy reference
+                set_codes = [cs.get('set_code', '') for cs in filtered_sets]
+                filtered_card['target_set_codes'] = set_codes
+                
+                filtered_cards.append(filtered_card)
+    
+    logger.info(f"Filtered {len(cards_list)} cards down to {len(filtered_cards)} cards with variants in '{target_set_name}'")
+    
+    return filtered_cards
+
+def get_set_code_prefix_from_name(set_name: str) -> Optional[str]:
+    """
+    Get the set code prefix for a given set name by checking cached sets.
+    
+    Args:
+        set_name: Name of the set to get code prefix for
+        
+    Returns:
+        Set code prefix (e.g., 'RA04', 'SUDA') or None if not found
+    """
+    try:
+        # Get MongoDB client
+        client = get_mongo_client()
+        if not client:
+            return None
+        
+        # Get database and collection
+        db = client.get_default_database()
+        collection = db[MONGODB_COLLECTION_NAME]
+        
+        # Search for the set by name (case-insensitive)
+        set_document = collection.find_one(
+            {"set_name": {"$regex": f"^{re.escape(set_name)}$", "$options": "i"}},
+            {"set_code": 1, "_id": 0}
+        )
+        
+        client.close()
+        
+        if set_document and 'set_code' in set_document:
+            set_code = set_document['set_code']
+            logger.info(f"Found set code '{set_code}' for set '{set_name}'")
+            return set_code
+        else:
+            logger.warning(f"No set code found for set '{set_name}'")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error getting set code for '{set_name}': {e}")
+        return None
+
+@app.route('/card-sets/<string:set_name>/cards', methods=['GET'])
+def get_cards_from_specific_set(set_name):
+    """
+    Get all cards from a specific card set, filtered to only show variants from that set
+    Args:
+        set_name: Name of the card set to fetch cards from
+    Returns: JSON response with filtered cards from the specified set
+    """
+    try:
+        # Get optional query parameters
+        filter_by_set = request.args.get('filter_by_set', 'true').lower() == 'true'
+        include_set_code = request.args.get('include_set_code', 'false').lower() == 'true'
+        
+        # URL encode the set name for the API call
+        encoded_set_name = quote(set_name)
+        
+        # Make request to YGO API for cards in this set
+        logger.info(f"Fetching cards from set: {set_name}")
+        api_url = f"{YGO_API_BASE_URL}/cardinfo.php?cardset={encoded_set_name}"
+        response = requests.get(api_url, timeout=15)
+        
+        if response.status_code == 200:
+            cards_data = response.json()
+            cards_list = cards_data.get('data', [])
+            
+            logger.info(f"Retrieved {len(cards_list)} cards from YGO API for {set_name}")
+            
+            # Filter cards by set if requested (default: true)
+            if filter_by_set:
+                filtered_cards = filter_cards_by_set(cards_list, set_name)
+            else:
+                filtered_cards = cards_list
+            
+            # Get set code if requested
+            set_code_info = {}
+            if include_set_code:
+                set_code = get_set_code_prefix_from_name(set_name)
+                if set_code:
+                    set_code_info = {
+                        "set_code": set_code,
+                        "set_code_prefix": set_code.split('-')[0] if '-' in set_code else set_code
+                    }
+            
+            logger.info(f"Returning {len(filtered_cards)} filtered cards from {set_name}")
+            
+            response_data = {
+                "success": True,
+                "set_name": set_name,
+                "data": filtered_cards,
+                "card_count": len(filtered_cards),
+                "total_cards_before_filter": len(cards_list),
+                "message": f"Successfully fetched {len(filtered_cards)} cards from {set_name}",
+                "filtered_by_set": filter_by_set
+            }
+            
+            # Add set code info if requested
+            if set_code_info:
+                response_data.update(set_code_info)
+            
+            return jsonify(response_data)
+            
+        elif response.status_code == 400:
+            return jsonify({
+                "success": False,
+                "set_name": set_name,
+                "error": "No cards found for this set or invalid set name",
+                "card_count": 0
+            }), 404
+            
+        else:
+            return jsonify({
+                "success": False,
+                "set_name": set_name,
+                "error": f"API error: HTTP {response.status_code}"
+            }), 500
+            
+    except requests.exceptions.Timeout:
+        logger.error(f"Timeout fetching cards for set: {set_name}")
+        return jsonify({
+            "success": False,
+            "set_name": set_name,
+            "error": "Request timed out"
+        }), 504
+        
+    except Exception as e:
+        logger.error(f"Error fetching cards for set {set_name}: {str(e)}")
+        return jsonify({
+            "success": False,
+            "set_name": set_name,
+            "error": "Internal server error"
+        }), 500
+
 @app.route('/card-sets/fetch-all-cards', methods=['POST'])
 def fetch_all_cards_from_sets():
     """
@@ -1852,6 +2039,11 @@ def fetch_all_cards_from_sets():
     Returns: JSON response with comprehensive card data from all sets
     """
     try:
+        # Get optional query parameters
+        data = request.get_json() or {}
+        filter_by_sets = data.get('filter_by_sets', True)
+        include_set_codes = data.get('include_set_codes', False)
+        
         # Check MongoDB connection
         if not MONGODB_CONNECTION_STRING:
             return jsonify({
@@ -1888,7 +2080,9 @@ def fetch_all_cards_from_sets():
             "processed_sets": 0,
             "failed_sets": 0,
             "total_cards_found": 0,
-            "processing_errors": []
+            "total_filtered_cards": 0,
+            "processing_errors": [],
+            "filter_by_sets": filter_by_sets
         }
         
         # Rate limiting: 20 requests per second max
@@ -1913,17 +2107,34 @@ def fetch_all_cards_from_sets():
                     cards_data = response.json()
                     cards_list = cards_data.get('data', [])
                     
+                    # Filter cards by set if requested
+                    if filter_by_sets:
+                        filtered_cards = filter_cards_by_set(cards_list, set_name)
+                    else:
+                        filtered_cards = cards_list
+                    
                     # Store cards data for this set
-                    all_cards_data[set_name] = {
+                    set_data = {
                         "set_info": card_set,
-                        "cards": cards_list,
-                        "card_count": len(cards_list)
+                        "cards": filtered_cards,
+                        "card_count": len(filtered_cards),
+                        "total_cards_before_filter": len(cards_list)
                     }
                     
+                    # Add set code info if requested
+                    if include_set_codes and set_code:
+                        set_data["set_code_info"] = {
+                            "set_code": set_code,
+                            "set_code_prefix": set_code.split('-')[0] if '-' in set_code else set_code
+                        }
+                    
+                    all_cards_data[set_name] = set_data
+                    
                     processing_stats["total_cards_found"] += len(cards_list)
+                    processing_stats["total_filtered_cards"] += len(filtered_cards)
                     processing_stats["processed_sets"] += 1
                     
-                    logger.info(f"Successfully fetched {len(cards_list)} cards from {set_name}")
+                    logger.info(f"Successfully fetched {len(cards_list)} cards, filtered to {len(filtered_cards)} from {set_name}")
                     
                 elif response.status_code == 400:
                     # Set might not have cards or name might be invalid
@@ -1932,6 +2143,7 @@ def fetch_all_cards_from_sets():
                         "set_info": card_set,
                         "cards": [],
                         "card_count": 0,
+                        "total_cards_before_filter": 0,
                         "note": "No cards found for this set"
                     }
                     processing_stats["processed_sets"] += 1
@@ -1975,10 +2187,9 @@ def fetch_all_cards_from_sets():
             if processing_stats["total_sets"] > 0 else 0
         )
         
-        logger.info(f"Completed processing all sets. Found {processing_stats['total_cards_found']} total cards")
+        logger.info(f"Completed processing all sets. Found {processing_stats['total_cards_found']} total cards, filtered to {processing_stats['total_filtered_cards']}")
         
         return jsonify({
-
             "success": True,
             "message": "Successfully fetched cards from all sets",
             "data": all_cards_data,
@@ -1990,70 +2201,6 @@ def fetch_all_cards_from_sets():
         return jsonify({
             "success": False,
             "error": "Internal server error during card fetching"
-       
-        }), 500
-
-@app.route('/card-sets/<string:set_name>/cards', methods=['GET'])
-def get_cards_from_specific_set(set_name):
-    """
-    Get all cards from a specific card set
-    Args:
-        set_name: Name of the card set to fetch cards from
-    Returns: JSON response with all cards from the specified set
-    """
-    try:
-        # URL encode the set name for the API call
-        encoded_set_name = quote(set_name)
-        
-        # Make request to YGO API for cards in this set
-        logger.info(f"Fetching cards from set: {set_name}")
-        api_url = f"{YGO_API_BASE_URL}/cardinfo.php?cardset={encoded_set_name}"
-        response = requests.get(api_url, timeout=15)
-        
-        if response.status_code == 200:
-            cards_data = response.json()
-            cards_list = cards_data.get('data', [])
-            
-            logger.info(f"Successfully fetched {len(cards_list)} cards from {set_name}")
-            
-            return jsonify({
-                "success": True,
-                "set_name": set_name,
-                "data": cards_list,
-                "card_count": len(cards_list),
-                "message": f"Successfully fetched {len(cards_list)} cards from {set_name}"
-            })
-            
-        elif response.status_code == 400:
-            return jsonify({
-                "success": False,
-                "set_name": set_name,
-                "error": "No cards found for this set or invalid set name",
-                "card_count": 0
-            }), 404
-            
-        else:
-            return jsonify({
-                "success": False,
-                "set_name": set_name,
-                "error": f"API error: HTTP {response.status_code}"
-            }), 500
-            
-    except requests.exceptions.Timeout:
-        logger.error(f"Timeout fetching cards for set: {set_name}")
-        return jsonify({
-            "success": False,
-            "set_name": set_name,
-            "error": "Request timed out"
-              
-               }), 504
-        
-    except Exception as e:
-        logger.error(f"Error fetching cards for set {set_name}: {str(e)}")
-        return jsonify({
-            "success": False,
-            "set_name": set_name,
-            "error": "Internal server error"
         }), 500
 
 @app.errorhandler(404)
