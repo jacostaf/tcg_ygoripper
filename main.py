@@ -646,7 +646,8 @@ async def select_best_card_variant(
                 page_context = await page.context.new_page()
                 try:
                     await page_context.goto(variant['href'], wait_until='networkidle', timeout=15000)
-                    tcg_rarity, tcg_art = await extract_rarity_from_tcgplayer(page_context)
+                    # Updated to expect three return values, price is ignored here
+                    tcg_rarity, tcg_art, _ = await extract_rarity_from_tcgplayer(page_context)
                     
                     # Check both rarity and art variant if provided (case-insensitive)
                     rarity_matches = tcg_rarity and normalize_rarity(tcg_rarity).lower() == normalize_rarity(card_rarity).lower()
@@ -697,7 +698,8 @@ async def select_best_card_variant(
             try:
                 logger.info(f"Checking rarity for variant: {variant['title']}")
                 await page_context.goto(variant['href'], wait_until='networkidle', timeout=15000)
-                tcg_rarity, tcg_art = await extract_rarity_from_tcgplayer(page_context)
+                # Updated to expect three return values, price is ignored here
+                tcg_rarity, tcg_art, _ = await extract_rarity_from_tcgplayer(page_context)
                 
                 if tcg_rarity:
                     normalized_tcg = normalize_rarity(tcg_rarity).lower()
@@ -736,7 +738,9 @@ async def select_best_card_variant(
         return None
 
 async def extract_prices_from_dom(page) -> Dict[str, Any]:
-    """Extract price data from PriceCharting product page DOM."""
+    """Extract price data from PriceCharting product page DOM.
+    This function extracts PriceCharting's own listed prices (e.g., Used, Graded).
+    It does NOT extract TCGPlayer prices from this page."""
     try:
         prices = await page.evaluate("""
             () => {
@@ -748,16 +752,16 @@ async def extract_prices_from_dom(page) -> Dict[str, Any]:
                 };
                 
                 const result = {
-                    marketPrice: null,
-                    allGradePrices: {},
-                    tcgPlayerPrice: null
+                    marketPrice: null, // This is PriceCharting's "Used Price" / "Ungraded"
+                    allGradePrices: {}
+                    // tcgPlayerPrice is no longer extracted here
                 };
                 
                 // Used price (ungraded)
                 const usedPriceElement = document.getElementById('used_price');
                 if (usedPriceElement) {
                     const usedPrice = extractPrice(usedPriceElement.textContent);
-                    if (usedPrice) {
+                    if (usedPrice !== null) {
                         result.marketPrice = usedPrice;
                         result.allGradePrices['Ungraded'] = usedPrice;
                     }
@@ -767,45 +771,35 @@ async def extract_prices_from_dom(page) -> Dict[str, Any]:
                 const completePriceElement = document.getElementById('complete_price');
                 if (completePriceElement) {
                     const completePrice = extractPrice(completePriceElement.textContent);
-                    if (completePrice) {
-                        result.allGradePrices['Grade 7'] = completePrice;
-                    }
+                    if (completePrice !== null) result.allGradePrices['Grade 7'] = completePrice;
                 }
                 
                 // Grade 8 (new_price)
                 const newPriceElement = document.getElementById('new_price');
                 if (newPriceElement) {
                     const newPrice = extractPrice(newPriceElement.textContent);
-                    if (newPrice) {
-                        result.allGradePrices['Grade 8'] = newPrice;
-                    }
+                    if (newPrice !== null) result.allGradePrices['Grade 8'] = newPrice;
                 }
                 
                 // Grade 9 (graded_price)
                 const gradedPriceElement = document.getElementById('graded_price');
                 if (gradedPriceElement) {
                     const gradedPrice = extractPrice(gradedPriceElement.textContent);
-                    if (gradedPrice) {
-                        result.allGradePrices['Grade 9'] = gradedPrice;
-                    }
+                    if (gradedPrice !== null) result.allGradePrices['Grade 9'] = gradedPrice;
                 }
                 
                 // Grade 9.5 (box_only_price)
                 const boxOnlyPriceElement = document.getElementById('box_only_price');
                 if (boxOnlyPriceElement) {
                     const boxOnlyPrice = extractPrice(boxOnlyPriceElement.textContent);
-                    if (boxOnlyPrice) {
-                        result.allGradePrices['Grade 9.5'] = boxOnlyPrice;
-                    }
+                    if (boxOnlyPrice !== null) result.allGradePrices['Grade 9.5'] = boxOnlyPrice;
                 }
                 
                 // PSA 10 (manual_only_price)
                 const manualOnlyPriceElement = document.getElementById('manual_only_price');
                 if (manualOnlyPriceElement) {
                     const manualOnlyPrice = extractPrice(manualOnlyPriceElement.textContent);
-                    if (manualOnlyPrice) {
-                        result.allGradePrices['PSA 10'] = manualOnlyPrice;
-                    }
+                    if (manualOnlyPrice !== null) result.allGradePrices['PSA 10'] = manualOnlyPrice;
                 }
                 
                 return result;
@@ -815,8 +809,8 @@ async def extract_prices_from_dom(page) -> Dict[str, Any]:
         return prices
         
     except Exception as e:
-        logger.error(f"Error extracting prices from DOM: {e}")
-        return {}
+        logger.error(f"Error extracting PriceCharting prices from DOM: {e}")
+        return {"marketPrice": None, "allGradePrices": {}} # Return default structure on error
 
 async def scrape_price_from_pricecharting(
     card_number: str,
@@ -906,23 +900,28 @@ async def scrape_price_from_pricecharting(
                 # Also try extracting from URL
                 actual_art_variant = extract_art_version(final_url)
             
-            # Extract and validate rarity
+            # Extract and validate rarity, and TCGPlayer price
             detected_rarity = None
             detected_art = None
+            tcg_actual_price = None # Initialize TCGPlayer actual price
+
             if card_rarity:
-                # Try to extract rarity from TCGPlayer first
-                tcg_result = await extract_rarity_from_tcgplayer(page)
-                tcg_rarity, tcg_art = tcg_result if tcg_result else (None, None)
+                # extract_rarity_from_tcgplayer now returns price as the third element
+                # This function navigates to TCGPlayer.com via a link on PriceCharting page
+                tcg_rarity_val, tcg_art_val, tcg_price_val = await extract_rarity_from_tcgplayer(page)
                 
-                if tcg_rarity:
-                    detected_rarity = tcg_rarity
+                if tcg_rarity_val:
+                    detected_rarity = tcg_rarity_val
                     # Only use TCGPlayer art variant if art_variant was provided in payload
-                    if art_variant and len(art_variant.strip()) > 0 and tcg_art:
-                        detected_art = tcg_art
-                else:
-                    # Fallback to checking page title for rarity
+                    if art_variant and len(art_variant.strip()) > 0 and tcg_art_val:
+                        detected_art = tcg_art_val
+                
+                tcg_actual_price = tcg_price_val # Store the extracted TCGPlayer price
+                
+                # Fallback for rarity if TCGPlayer didn't yield one (e.g., TCGPlayer link missing)
+                if not detected_rarity:
                     rarity_variants = normalize_rarity_for_matching(card_rarity)
-                    title_lower = page_title.lower()
+                    title_lower = page_title.lower() # page_title is from PriceCharting
                     
                     for rarity_variant in rarity_variants:
                         if rarity_variant in title_lower:
@@ -936,8 +935,8 @@ async def scrape_price_from_pricecharting(
             # otherwise use what we extracted from title or URL, or fall back to provided one
             final_art_variant = detected_art if detected_art else (actual_art_variant if actual_art_variant else art_variant)
             
-            # Extract prices from the product page
-            price_data = await extract_prices_from_dom(page)
+            # Extract PriceCharting's own prices (ungraded, graded, etc.)
+            price_charting_prices = await extract_prices_from_dom(page)
             
             # Extract set code and booster set name
             set_code = extract_set_code(card_number)
@@ -948,19 +947,19 @@ async def scrape_price_from_pricecharting(
             # Create price record with clean data
             price_record = {
                 "card_number": card_number,
-                "card_name": page_title,  # Use cleaned page title
-                "card_art_variant": final_art_variant,  # Use actual art variant found
-                "card_rarity": final_rarity,  # Use detected or requested rarity
+                "card_name": page_title,  # Use cleaned page title from PriceCharting
+                "card_art_variant": final_art_variant,
+                "card_rarity": final_rarity,
                 "set_code": set_code,
                 "booster_set_name": booster_set_name,
-                "tcg_price": price_data.get('tcgPlayerPrice'),
-                "pc_ungraded_price": price_data.get('marketPrice'),
-                "pc_grade7": price_data.get('allGradePrices', {}).get('Grade 7'),
-                "pc_grade8": price_data.get('allGradePrices', {}).get('Grade 8'),
-                "pc_grade9": price_data.get('allGradePrices', {}).get('Grade 9'),
-                "pc_grade9_5": price_data.get('allGradePrices', {}).get('Grade 9.5'),
-                "pc_grade10": price_data.get('allGradePrices', {}).get('PSA 10'),
-                "source_url": final_url,
+                "tcg_price": tcg_actual_price, # Use the price extracted directly from TCGPlayer.com
+                "pc_ungraded_price": price_charting_prices.get('marketPrice'),
+                "pc_grade7": price_charting_prices.get('allGradePrices', {}).get('Grade 7'),
+                "pc_grade8": price_charting_prices.get('allGradePrices', {}).get('Grade 8'),
+                "pc_grade9": price_charting_prices.get('allGradePrices', {}).get('Grade 9'),
+                "pc_grade9_5": price_charting_prices.get('allGradePrices', {}).get('Grade 9.5'),
+                "pc_grade10": price_charting_prices.get('allGradePrices', {}).get('PSA 10'),
+                "source_url": final_url, # This is the PriceCharting URL
                 "scrape_success": True,
                 "last_price_updt": datetime.now(UTC)
             }
@@ -1211,358 +1210,334 @@ def debug_art_extraction():
             'error': str(e)
         }), 500
 
-async def extract_rarity_from_tcgplayer(page) -> tuple[Optional[str], Optional[str]]:
-    """Extract rarity and art variant information from TCGPlayer via any TCGPlayer link on the page.
-    Returns: Tuple of (rarity, art_variant)"""
+async def extract_rarity_from_tcgplayer(page) -> tuple[Optional[str], Optional[str], Optional[float]]:
+    """Extract rarity, art variant, and price information from TCGPlayer page.
+    It finds a TCGPlayer link on the current (PriceCharting) page, navigates to it,
+    and then extracts the data.
+    Returns: Tuple of (rarity, art_variant, price)"""
     try:
-        # Find TCGPlayer link with more comprehensive search
+        # Find TCGPlayer link on the current (PriceCharting) page
         tcgplayer_link = await page.evaluate("""
             () => {
                 // First try explicit "SEE IT" button or TCGPlayer link
-                const buttons = Array.from(document.querySelectorAll('a, button'));
-                const tcgButton = buttons.find(b => 
-                    b.getAttribute('href')?.includes('tcgplayer.com') && 
-                    (b.textContent.includes('SEE IT') || 
-                     b.textContent.includes('TCGplayer') ||
-                     b.textContent.includes('Buy Now'))
-                );
-                
-                if (tcgButton?.href) {
-                    console.log('Found TCGPlayer button:', tcgButton.textContent);
-                    return tcgButton.href;
+                const buttons = Array.from(document.querySelectorAll('a[href*="tcgplayer.com"], button[onclick*="tcgplayer.com"]'));
+                const tcgButton = buttons.find(b => {
+                    const text = (b.textContent || '').toLowerCase();
+                    const href = b.getAttribute('href') || (b.getAttribute('onclick') || '');
+                    return href.includes('tcgplayer.com') && 
+                           (text.includes('see it') || text.includes('tcgplayer') || text.includes('buy now') || text.includes('market price'));
+                });
+                if (tcgButton) {
+                    let link = tcgButton.getAttribute('href');
+                    if (!link && tcgButton.getAttribute('onclick')) { // Handle onclick attributes
+                        const onclickAttr = tcgButton.getAttribute('onclick');
+                        const urlMatch = onclickAttr.match(/window\\.open\\(['"]([^'"]+)['"]/);
+                        if (urlMatch && urlMatch[1]) link = urlMatch[1];
+                    }
+                    if (link) {
+                         console.log('Found TCGPlayer button/link:', (tcgButton.textContent || '').trim(), 'URL:', link);
+                         return link;
+                    }
                 }
                 
-                // Then try price comparison section
-                const priceSection = document.querySelector('#tcg_prices, #price-comparison');
-                if (priceSection) {
-                    const tcgLinks = Array.from(priceSection.querySelectorAll('a'))
-                        .filter(a => a.href?.includes('tcgplayer.com'));
+                // Then try price comparison section or any TCGPlayer link
+                const priceSections = document.querySelectorAll('#tcg_prices, #price-comparison, .price-points, .product-prices, div[class*="price-guide_vendor-price"], div[class*="price-guide_tcgplayer"]');
+                for (const section of priceSections) {
+                    const tcgLinks = Array.from(section.querySelectorAll('a[href*="tcgplayer.com"]'));
                     if (tcgLinks.length > 0) {
-                        console.log('Found TCGPlayer link in price section');
+                        console.log('Found TCGPlayer link in price section:', tcgLinks[0].href);
                         return tcgLinks[0].href;
                     }
                 }
                 
-                // Last resort: any TCGPlayer link
-                const allTcgLinks = Array.from(document.querySelectorAll('a'))
-                    .filter(a => a.href?.includes('tcgplayer.com'));
+                // Last resort: any TCGPlayer link on the page
+                const allTcgLinks = Array.from(document.querySelectorAll('a[href*="tcgplayer.com"]'));
                 if (allTcgLinks.length > 0) {
-                    console.log('Found general TCGPlayer link');
+                    console.log('Found general TCGPlayer link:', allTcgLinks[0].href);
                     return allTcgLinks[0].href;
                 }
                 
-                console.log('NO TCGPlayer links found');
+                console.log('NO TCGPlayer links found on PriceCharting page');
                 return null;
             }
         """);
         
         if not tcgplayer_link:
-            logger.debug("No TCGPlayer link found")
-            return None, None
+            logger.warning("No TCGPlayer link found on PriceCharting page to navigate for price/rarity.")
+            return None, None, None # Return None for all three
             
-        logger.info(f"Found TCGPlayer link: {tcgplayer_link}")
+        logger.info(f"Navigating to TCGPlayer link: {tcgplayer_link}")
         
-        # Open TCGPlayer page in a new tab
+        # Open TCGPlayer page in a new tab/context
         tcg_page = await page.context.new_page()
         try:
-            await tcg_page.goto(tcgplayer_link, wait_until='networkidle', timeout=15000)
+            await tcg_page.goto(tcgplayer_link, wait_until='networkidle', timeout=20000) # Increased timeout
             
-            # Extract rarity and art variant from TCGPlayer page with improved extraction
+            # Extract rarity, art variant, and price from TCGPlayer page
             result = await tcg_page.evaluate("""
                 () => {
                     function cleanExtractedRarity(text) {
                         if (!text) return '';
-                        
-                        // Comprehensive rarity patterns in order of specificity (most specific first)
                         const rarityPatterns = [
-                            // Quarter Century variants
-                            /quarter[\\s-]century\\s+secret\\s+rare/i,
-                            /25th\\s+anniversary\\s+secret\\s+rare/i,
-                            /quarter[\\s-]century\\s+ultra\\s+rare/i,
-                            /quarter[\\s-]century\\s+rare/i,
-                            
-                            // Platinum and special secret variants
-                            /platinum\\s+secret\\s+rare/i,
-                            /prismatic\\s+secret\\s+rare/i,
-                            /ultra\\s+secret\\s+rare/i,
-                            /secret\\s+ultra\\s+rare/i,
-                            
-                            // Starlight and Ghost rarities
-                            /starlight\\s+rare/i,
-                            /ghost\\s+rare/i,
-                            
-                            // Parallel variants
-                            /super\\s+parallel\\s+rare/i,
-                            /ultra\\s+parallel\\s+rare/i,
-                            /parallel\\s+rare/i,
-                            /parallel\\s+common/i,
-                            
-                            // Collector's and special rarities
-                            /collector'?s\\s+rare/i,
-                            /millennium\\s+rare/i,
-                            /starfoil\\s+rare/i,
-                            /holofoil\\s+rare/i,
-                            
-                            // Gold variants
-                            /gold\\s+ultra\\s+rare/i,
-                            /gold\\s+rare/i,
-                            
-                            // Pharaoh's variants
-                            /pharaoh'?s\\s+rare/i,
-                            /ultra\\s+rare\\s*\\(\\s*pharaoh'?s\\s+rare\\s*\\)/i,
-                            
-                            // Standard rarities
-                            /ultimate\\s+rare/i,
-                            /secret\\s+rare/i,
-                            /ultra\\s+rare/i,
-                            /super\\s+rare/i,
-                            
-                            // Short print variants
-                            /super\\s+short\\s+print\\s+common/i,
-                            /short\\s+print\\s+common/i,
-                            /normal\\s+common/i,
-                            
-                            // Basic rarities (must be last)
-                            /\\brare\\b/i,
-                            /\\bcommon\\b/i,
-                            /\\buncommon\\b/i
+                            /quarter[\\s-]century\\s+secret\\s+rare/i, /25th\\s+anniversary\\s+secret\\s+rare/i,
+                            /quarter[\\s-]century\\s+ultra\\s+rare/i, /quarter[\\s-]century\\s+rare/i,
+                            /platinum\\s+secret\\s+rare/i, /prismatic\\s+secret\\s+rare/i,
+                            /ultra\\s+secret\\s+rare/i, /secret\\s+ultra\\s+rare/i,
+                            /starlight\\s+rare/i, /ghost\\s+rare/i,
+                            /super\\s+parallel\\s+rare/i, /ultra\\s+parallel\\s+rare/i,
+                            /parallel\\s+rare/i, /parallel\\s+common/i,
+                            /collector'?s\\s+rare/i, /millennium\\s+rare/i,
+                            /starfoil\\s+rare/i, /holofoil\\s+rare/i,
+                            /gold\\s+ultra\\s+rare/i, /gold\\s+rare/i,
+                            /pharaoh'?s\\s+rare/i, /ultra\\s+rare\\s*\\(\\s*pharaoh'?s\\s+rare\\s*\\)/i,
+                            /ultimate\\s+rare/i, /secret\\s+rare/i, /ultra\\s+rare/i, /super\\s+rare/i,
+                            /super\\s+short\\s+print\\s+common/i, /short\\s+print\\s+common/i, /normal\\s+common/i,
+                            /\\brare\\b/i, /\\bcommon\\b/i, /\\buncommon\\b/i
                         ];
-                        
-                        // Try to match a complete rarity pattern first
                         for (const pattern of rarityPatterns) {
                             const match = text.match(pattern);
-                            if (match) {
-                                console.log('Found complete rarity pattern:', match[0]);
-                                return match[0].trim();
-                            }
+                            if (match) return match[0].trim();
                         }
-                        
-                        // If no complete pattern found, try to extract up to rarity boundary
                         const lowerText = text.toLowerCase();
-                        
-                        // Define all possible rarity ending words
-                        const rarityEndings = [
-                            'rare', 'common', 'uncommon'
-                        ];
-                        
+                        const rarityEndings = ['rare', 'common', 'uncommon'];
                         for (const ending of rarityEndings) {
                             const index = lowerText.indexOf(ending);
                             if (index !== -1) {
-                                // Find the end position of the rarity word
                                 const endIndex = index + ending.length;
-                                
-                                // Check if this is a word boundary (not part of a larger word)
-                                const isWordBoundary = (
-                                    endIndex >= lowerText.length ||
-                                    /[\\s\\n\\r\\t.,;:!?()[\\]{}|"'`~@#$%^&*+=<>\\/\\\\-]/.test(lowerText[endIndex])
-                                );
-                                
+                                const isWordBoundary = (endIndex >= lowerText.length || /[\\s\\n\\r\\t.,;:!?()[\\]{}|"'`~@#$%^&*+=<>\\/\\\\-]/.test(lowerText[endIndex]));
                                 if (isWordBoundary) {
-                                    // Extract text up to the end of the rarity word
                                     let extracted = text.substring(0, endIndex).trim();
-                                    
-                                    // Clean up extracted text by working backwards to find rarity start
                                     const words = extracted.split(/\\s+/);
-                                    
-                                    // If we have too many words, try to find where the rarity actually starts
                                     if (words.length > 5) {
-                                        const rarityKeywords = [
-                                            'quarter', 'century', '25th', 'anniversary',
-                                            'platinum', 'prismatic', 'starlight', 'ghost',
-                                            'parallel', 'collector', 'millennium', 'starfoil',
-                                            'holofoil', 'gold', 'pharaoh', 'ultimate',
-                                            'secret', 'ultra', 'super', 'short', 'print',
-                                            'normal'
-                                        ];
-                                        
-                                        // Find the start of rarity-related words
+                                        const rarityKeywords = ['quarter', 'century', '25th', 'anniversary', 'platinum', 'prismatic', 'starlight', 'ghost', 'parallel', 'collector', 'millennium', 'starfoil', 'holofoil', 'gold', 'pharaoh', 'ultimate', 'secret', 'ultra', 'super', 'short', 'print', 'normal'];
                                         let rarityStart = -1;
                                         for (let i = words.length - 1; i >= 0; i--) {
                                             const word = words[i].toLowerCase().replace(/[^\\w]/g, '');
-                                            if (rarityKeywords.includes(word)) {
-                                                rarityStart = i;
-                                            } else if (rarityStart !== -1) {
-                                                // Stop if we found rarity words but hit a non-rarity word
-                                                break;
-                                            }
+                                            if (rarityKeywords.includes(word)) rarityStart = i;
+                                            else if (rarityStart !== -1) break;
                                         }
-                                        
-                                        if (rarityStart !== -1) {
-                                            extracted = words.slice(rarityStart).join(' ');
-                                        } else {
-                                            // Fallback: take last 4 words
-                                            extracted = words.slice(-4).join(' ');
-                                        }
+                                        if (rarityStart !== -1) extracted = words.slice(rarityStart).join(' ');
+                                        else extracted = words.slice(-4).join(' ');
                                     }
-                                    
-                                    // Final validation - reject if still too long or contains non-rarity words
-                                    if (extracted.length > 60) {
-                                        console.log('Extracted rarity too long, truncating:', extracted.substring(0, 60));
-                                        extracted = extracted.substring(0, 60);
-                                    }
-                                    
+                                    if (extracted.length > 60) extracted = extracted.substring(0, 60);
                                     return extracted;
                                 }
                             }
                         }
-                        
-                        // Fallback: return first 50 characters if no rarity ending found
-                        console.log('No rarity boundary found, using fallback');
                         return text.substring(0, 50).trim();
                     }
 
                     function extractArtVariant(text) {
                         if (!text) return null;
-                        
-                        // Check for numbered variants first
-                        const numberMatches = [
-                            text.match(/\\b(\\d+)(?:st|nd|rd|th)?\\s*(?:art|artwork)\\b/i),
-                            text.match(/\\[(\\d+)(?:st|nd|rd|th)?\\]/i),
-                            text.match(/\\((\\d+)(?:st|nd|rd|th)?\\)/i),
-                            text.match(/\\b(\\d+)(?:st|nd|rd|th)?\\b(?=.*?(?:art|artwork))/i)
-                        ];
-                        
-                        for (const match of numberMatches) {
-                            if (match && match[1]) {
-                                console.log('Found numbered art variant:', match[1]);
-                                return match[1];
-                            }
-                        }
-                        
-                        // Check for named variants
-                        const namedMatches = [
-                            text.match(/\\b(arkana|joey\\s*wheeler|kaiba|pharaoh|anime|manga)\\b/i),
-                            text.match(/\\[(.*?(?:art|artwork))\\]/i),
-                            text.match(/\\((.*?(?:art|artwork))\\)/i)
-                        ];
-                        
-                        for (const match of namedMatches) {
-                            if (match && match[1]) {
-                                console.log('Found named art variant:', match[1]);
-                                return match[1];
-                            }
-                        }
-                        
+                        const numberMatches = [text.match(/\\b(\\d+)(?:st|nd|rd|th)?\\s*(?:art|artwork)\\b/i), text.match(/\\[(\\d+)(?:st|nd|rd|th)?\\]/i), text.match(/\\((\\d+)(?:st|nd|rd|th)?\\)/i), text.match(/\\b(\\d+)(?:st|nd|rd|th)?\\b(?=.*?(?:art|artwork))/i)];
+                        for (const match of numberMatches) if (match && match[1]) return match[1];
+                        const namedMatches = [text.match(/\\b(arkana|joey\\s*wheeler|kaiba|pharaoh|anime|manga)\\b/i), text.match(/\\[(.*?(?:art|artwork))\\]/i), text.match(/\\((.*?(?:art|artwork))\\)/i)];
+                        for (const match of namedMatches) if (match && match[1]) return match[1];
                         return null;
                     }
                     
+                    const extractPriceValue = (text) => {
+                        if (!text) return null;
+                        const match = text.match(/\\$([\\d,.]+)/);
+                        return match ? parseFloat(match[1].replace(/,/g, '')) : null;
+                    };
+
                     let foundRarity = null;
                     let foundArtVariant = null;
-                    
-                    // 1. Look for both in product details section first
-                    const productDetails = document.querySelector('[class*="product-details"], [class*="card-details"], .details');
-                    if (productDetails) {
-                        console.log('Found product details section');
-                        const detailsText = productDetails.textContent;
-                        
-                        // Check for rarity in details
-                        const rarityMatch = detailsText.match(/Rarity:?\\s*([^\\n,]+)/i);
-                        if (rarityMatch) {
-                            console.log('Found rarity in product details:', rarityMatch[1]);
-                            foundRarity = cleanExtractedRarity(rarityMatch[1]);
+                    let tcgPrice = null;
+
+                    // Rarity & Art Extraction (from TCGPlayer page)
+                    const productDetailsSection = document.querySelector('section.product-details, div[data-testid="product-details"], div.product-details__content, section[class*="product-details"]');
+                    if (productDetailsSection) {
+                        const detailsText = productDetailsSection.textContent || '';
+                        const rarityLabel = productDetailsSection.querySelector('div[data-testid*="Rarity"] span, dt.product-details__label, div[class*="attribute-label"]');
+                        if (rarityLabel && (rarityLabel.textContent || '').toLowerCase().includes('rarity')) {
+                            const rarityValueElement = rarityLabel.nextElementSibling || productDetailsSection.querySelector('dd.product-details__value, div[data-testid*="Rarity"] a, div[class*="attribute-value"]');
+                            if (rarityValueElement) foundRarity = cleanExtractedRarity(rarityValueElement.textContent || '');
                         }
-                        
-                        // Check for art variant in details
+                        if (!foundRarity) { // Fallback if specific structure not found
+                             const rarityMatchAlt = detailsText.match(/Rarity:?\\s*([^\\n,]+)/i);
+                             if (rarityMatchAlt) foundRarity = cleanExtractedRarity(rarityMatchAlt[1]);
+                        }
                         foundArtVariant = extractArtVariant(detailsText);
                     }
-                    
-                    // 2. Check page heading/title if not found
-                    if (!foundRarity || !foundArtVariant) {
-                        const heading = document.querySelector('h1');
+
+                    if (!foundRarity) {
+                        const heading = document.querySelector('h1, .product-details__name');
                         if (heading) {
-                            const text = heading.textContent;
-                            
-                            // Check for rarity if not found
-                            if (!foundRarity) {
-                                // First try to find rarity in square brackets
-                                const rarityInBrackets = text.match(/\\[(.*?(?:rare|common).*?)\\]/i);
-                                if (rarityInBrackets) {
-                                    foundRarity = cleanExtractedRarity(rarityInBrackets[1]);
-                                } else {
-                                    // Try to extract rarity from entire title
-                                    foundRarity = cleanExtractedRarity(text);
-                                }
-                            }
-                            
-                            // Check for art variant if not found
-                            if (!foundArtVariant) {
-                                foundArtVariant = extractArtVariant(text);
-                            }
+                            const text = heading.textContent || '';
+                            const rarityInBrackets = text.match(/\\[(.*?(?:rare|common).*?)\\]/i);
+                            if (rarityInBrackets) foundRarity = cleanExtractedRarity(rarityInBrackets[1]);
+                            else foundRarity = cleanExtractedRarity(text);
+                            if (!foundArtVariant) foundArtVariant = extractArtVariant(text);
                         }
                     }
                     
-                    // 3. Check listing titles if still not found (only first 3 to avoid noise)
-                    if (!foundRarity || !foundArtVariant) {
-                        const listings = Array.from(document.querySelectorAll('[class*="listing"], [class*="product-title"]'));
-                        for (const listing of listings.slice(0, 3)) {
-                            const text = listing.textContent;
-                            
-                            // Check for rarity if not found yet
-                            if (!foundRarity) {
-                                const extractedRarity = cleanExtractedRarity(text);
-                                // Only accept if it's reasonable length
-                                if (extractedRarity && extractedRarity.length <= 60) {
-                                    foundRarity = extractedRarity;
-                                }
-                            }
-                            
-                            // Check for art variant if not found yet
-                            if (!foundArtVariant) {
-                                foundArtVariant = extractArtVariant(text);
-                            }
-                            
-                            if (foundRarity && foundArtVariant) break;
-                        }
-                    }
+                    // TCGPlayer Price Extraction - UPDATED TO MATCH SCREENSHOTS EXACTLY
+                    console.log('Starting TCGPlayer price extraction...');
                     
-                    // Final cleanup and validation
-                    if (foundRarity) {
-                        // Ensure the rarity is properly cleaned
-                        foundRarity = cleanExtractedRarity(foundRarity);
+                    // PRIORITY 1: Market Price from Price Guide section (Screenshot 2 - $0.16)
+                    // Look for the exact structure shown in screenshot 2
+                    const priceGuideSection = document.querySelector('section[data-v-5b7a2a7c][class*="price-guide"]');
+                    if (priceGuideSection) {
+                        console.log('Found price-guide section, searching for Market Price...');
                         
-                        // Additional validation - reject if contains obvious non-rarity content
-                        const invalidPatterns = [
-                            /attribute/i, /monster/i, /type/i, /level/i, /attack/i, /defense/i,
-                            /\\$\\d+/i, /price/i, /market/i, /listing/i, /seller/i, /condition/i,
-                            /near\\s+mint/i, /lightly\\s+played/i
+                        // Look for "Market Price" text specifically
+                        const marketPriceElements = Array.from(priceGuideSection.querySelectorAll('*'));
+                        for (const element of marketPriceElements) {
+                            const textContent = (element.textContent || '').trim();
+                            if (textContent === 'Market Price') {
+                                console.log('Found Market Price label element');
+                                
+                                // Look for price in the same table row or nearby elements
+                                const parentRow = element.closest('tr');
+                                if (parentRow) {
+                                    const priceCell = parentRow.querySelector('td span[class*="price-points__upper_price"]');
+                                    if (priceCell) {
+                                        tcgPrice = extractPriceValue(priceCell.textContent);
+                                        if (tcgPrice !== null) {
+                                            console.log('Market Price found from table row:', tcgPrice);
+                                            break;
+                                        }
+                                    }
+                                }
+                                
+                                // Alternative: Look for sibling or nearby price elements
+                                const nearbyPriceSpan = element.parentElement?.querySelector('span[class*="price-points__upper_price"]') || 
+                                                       element.closest('section')?.querySelector('span[class*="price-points__upper_price"]');
+                                if (nearbyPriceSpan) {
+                                    tcgPrice = extractPriceValue(nearbyPriceSpan.textContent);
+                                    if (tcgPrice !== null) {
+                                        console.log('Market Price found from nearby element:', tcgPrice);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    // PRIORITY 2: Spotlight listing price (Screenshot 1 - $0.02)
+                    if (tcgPrice === null) {
+                        console.log('Market Price not found, searching for Spotlight price...');
+                        
+                        // Look for spotlight section with data-v attributes matching screenshot
+                        const spotlightSection = document.querySelector('section[data-v-a9d86be2][class*="spotlight"]');
+                        if (spotlightSection) {
+                            console.log('Found spotlight section');
+                            
+                            // Look for price element within spotlight
+                            const spotlightPriceSpan = spotlightSection.querySelector('span[data-v-a9d86be2][class*="spotlight__price"]');
+                            if (spotlightPriceSpan) {
+                                tcgPrice = extractPriceValue(spotlightPriceSpan.textContent);
+                                if (tcgPrice !== null) {
+                                    console.log('Spotlight Price found:', tcgPrice);
+                                }
+                            } else {
+                                // Fallback: any span with price-like content in spotlight
+                                const allSpansInSpotlight = spotlightSection.querySelectorAll('span');
+                                for (const span of allSpansInSpotlight) {
+                                    if (span.textContent && span.textContent.includes('$')) {
+                                        tcgPrice = extractPriceValue(span.textContent);
+                                        if (tcgPrice !== null) {
+                                            console.log('Spotlight Price found (fallback):', tcgPrice);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            // Generic spotlight selector fallback
+                            const genericSpotlight = document.querySelector('div[class*="spotlight"], section[class*="spotlight"]');
+                            if (genericSpotlight) {
+                                const priceSpan = genericSpotlight.querySelector('span[class*="price"], span:contains("$")');
+                                if (priceSpan) {
+                                    tcgPrice = extractPriceValue(priceSpan.textContent);
+                                    if (tcgPrice !== null) {
+                                        console.log('Generic Spotlight Price found:', tcgPrice);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    // PRIORITY 3: Alternative Market Price selectors if above fails
+                    if (tcgPrice === null) {
+                        console.log('Spotlight price not found, trying alternative Market Price selectors...');
+                        
+                        // More specific selectors based on screenshot HTML structure
+                        const alternativeSelectors = [
+                            'td[data-v-ff603ccd] span[class*="price-points__upper_price"]', // From screenshot 2
+                            'span[data-v-ff603ccd][class*="price-points__upper_price"]',
+                            'table[data-v-ff603ccd] span[class*="price-points__upper_price"]'
                         ];
                         
+                        for (const selector of alternativeSelectors) {
+                            const element = document.querySelector(selector);
+                            if (element) {
+                                // Check if this is in a Market Price context
+                                const parentText = element.closest('tr, section, div')?.textContent || '';
+                                if (parentText.toLowerCase().includes('market price')) {
+                                    tcgPrice = extractPriceValue(element.textContent);
+                                    if (tcgPrice !== null) {
+                                        console.log('Alternative Market Price found with selector:', selector, 'Price:', tcgPrice);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Log final result
+                    if (tcgPrice !== null) {
+                        console.log('FINAL TCG PRICE EXTRACTED:', tcgPrice);
+                    } else {
+                        console.log('NO TCG PRICE FOUND - checking page structure...');
+                        // Debug: log available price-related elements
+                        const allPriceElements = Array.from(document.querySelectorAll('span[class*="price"], *[class*="price"]'));
+                        console.log('Available price elements count:', allPriceElements.length);
+                        allPriceElements.slice(0, 5).forEach((el, index) => {
+                            console.log(`Price element ${index}:`, el.className, el.textContent?.substring(0, 50));
+                        });
+                    }
+                    
+                    // Final cleanup for rarity
+                    if (foundRarity) {
+                        foundRarity = cleanExtractedRarity(foundRarity);
+                        const invalidPatterns = [/attribute/i, /monster/i, /type/i, /level/i, /attack/i, /defense/i, /\\$\\d+/i, /price/i, /market/i, /listing/i, /seller/i, /condition/i, /near\\s+mint/i, /lightly\\s+played/i];
                         for (const pattern of invalidPatterns) {
                             if (pattern.test(foundRarity)) {
                                 console.log('Rejecting rarity due to invalid content:', foundRarity);
-                                foundRarity = null;
-                                break;
+                                foundRarity = null; break;
                             }
                         }
-                        
-                        // Final length check
                         if (foundRarity && foundRarity.length > 60) {
                             console.log('Final rarity too long, rejecting:', foundRarity);
                             foundRarity = null;
                         }
                     }
                     
-                    console.log('Final extraction results:', { rarity: foundRarity, artVariant: foundArtVariant });
-                    return { rarity: foundRarity, artVariant: foundArtVariant };
+                    console.log('Final TCGPlayer extraction results:', { rarity: foundRarity, artVariant: foundArtVariant, price: tcgPrice });
+                    return { rarity: foundRarity, artVariant: foundArtVariant, price: tcgPrice };
                 }
             """)
             
             rarity = result.get('rarity')
             art_variant = result.get('artVariant')
+            tcg_price = result.get('price') # Get the extracted price
             
-            if rarity:
-                logger.info(f"Extracted rarity from TCGPlayer: {rarity}")
-            if art_variant:
-                logger.info(f"Extracted art variant from TCGPlayer: {art_variant}")
+            if rarity: logger.info(f"Extracted rarity from TCGPlayer: {rarity}")
+            if art_variant: logger.info(f"Extracted art variant from TCGPlayer: {art_variant}")
+            if tcg_price is not None: logger.info(f"Extracted price from TCGPlayer.com: ${tcg_price}")
+            else: logger.warning("Could not extract price from TCGPlayer.com page.")
             
-            return rarity.strip() if rarity else None, art_variant.strip() if art_variant else None
+            return rarity.strip() if rarity else None, art_variant.strip() if art_variant else None, tcg_price
                 
         finally:
             await tcg_page.close()
             
     except Exception as e:
-        logger.error(f"Error extracting data from TCGPlayer: {e}")
-        return None, None
+        logger.error(f"Error extracting data from TCGPlayer.com: {e}")
+        return None, None, None # Return None for all three on error
 
 @app.route('/card-sets', methods=['GET'])
 def get_all_card_sets():
@@ -1808,6 +1783,7 @@ def get_card_sets_from_cache():
             "message": f"Retrieved {len(card_sets)} card sets from cache"
         })
         
+           
     except Exception as e:
         logger.error(f"Error retrieving card sets from cache: {str(e)}")
         return jsonify({
