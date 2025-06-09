@@ -279,6 +279,12 @@ def normalize_rarity(rarity: str) -> str:
             return 'premium gold rare'
         return 'gold rare'
     
+    # Special handling for Platinum variants
+    if 'platinum' in normalized:
+        if 'secret' in normalized:
+            return 'platinum secret rare'
+        return 'platinum rare'
+    
     # Special handling for other special rarities
     if 'duel terminal' in normalized:
         return 'duel terminal rare'
@@ -403,12 +409,27 @@ def normalize_rarity_for_matching(rarity: str) -> List[str]:
     if 'gold' in normalized:
         if 'premium' in normalized:
             variants.extend([
-                'premium gold rare'
+                'premium gold rare',
+                'premium gold'
             ])
         else:
             variants.extend([
                 'gold rare',
                 'gold'
+            ])
+    
+    # Handle Platinum variants
+    if 'platinum' in normalized:
+        if 'secret' in normalized:
+            variants.extend([
+                'platinum secret rare',
+                'psr',
+                'plat secret rare'
+            ])
+        else:
+            variants.extend([
+                'platinum rare',
+                'platinum'
             ])
     
     # Handle Duel Terminal Rare
@@ -421,19 +442,22 @@ def normalize_rarity_for_matching(rarity: str) -> List[str]:
     # Handle Mosaic Rare
     if 'mosaic' in normalized:
         variants.extend([
-            'mosaic rare'
+            'mosaic rare',
+            'mosaic'
         ])
     
     # Handle Shatterfoil Rare
     if 'shatterfoil' in normalized:
         variants.extend([
-            'shatterfoil rare'
+            'shatterfoil rare',
+            'shatterfoil'
         ])
     
     # Handle Starfoil Rare
     if 'starfoil' in normalized:
         variants.extend([
-            'starfoil rare'
+            'starfoil rare',
+            'starfoil'
         ])
     
     # Handle Hobby League Rare
@@ -446,7 +470,8 @@ def normalize_rarity_for_matching(rarity: str) -> List[str]:
     # Handle Millennium Rare
     if 'millennium' in normalized:
         variants.extend([
-            'millennium rare'
+            'millennium rare',
+            'millennium'
         ])
     
     # Handle 25th Anniversary variants
