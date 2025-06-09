@@ -1678,209 +1678,222 @@ async def extract_prices_from_tcgplayer_dom(page) -> Dict[str, Any]:
                 result.debug_info.push(`Page title: ${document.title}`);
                 result.debug_info.push(`URL: ${window.location.href}`);
                 
-                // Enhanced TCGPlayer 2025 selectors - more comprehensive coverage
-                const tcgLowSelectors = [
-                    // Primary TCG Low price selectors
-                    '[data-testid="tcg-low-price"]',
-                    '[data-testid="listing-price"]',
-                    '.tcg-low-price .price-text',
-                    '.tcg-low .price-text',
-                    '.low-price .price-text',
-                    '.tcg-low-price span',
-                    '.tcg-low span',
-                    '.price-point--tcg-low .price-text',
-                    '.price-point--tcg-low span',
-                    '.tcg-low-container .price',
-                    '.tcg-low-container span',
-                    // Modern structure selectors
-                    '.price-point__price:first-of-type',
-                    '.price-list .price-item:first-child .price',
-                    '.pricing-section .tcg-price',
-                    '.product-pricing .low-price'
-                ];
+                // Strategy 1: Enhanced text-based search for exact label matches
+                // Look for elements that contain specific pricing labels
+                const allElements = Array.from(document.querySelectorAll('*')).filter(el => 
+                    el.offsetHeight > 0 && el.offsetWidth > 0 && el.textContent?.trim()
+                );
                 
-                const marketPriceSelectors = [
-                    // Primary Market price selectors  
-                    '[data-testid="market-price"]',
-                    '[data-testid="tcg-market-price"]',
-                    '.market-price .price-text',
-                    '.tcg-market-price .price-text',
-                    '.market-price span',
-                    '.tcg-market-price span',
-                    '.market-price__value',
-                    '.price-point--market .price-text',
-                    '.price-point--market span',
-                    '.market-container .price',
-                    '.market-container span',
-                    // Modern structure selectors
-                    '.price-point__price:nth-of-type(2)',
-                    '.price-list .price-item:nth-child(2) .price',
-                    '.pricing-section .market-price',
-                    '.product-pricing .market-price'
-                ];
+                // Find elements containing "TCG Low" or similar
+                const tcgLowContainers = allElements.filter(el => {
+                    const text = el.textContent?.toLowerCase() || '';
+                    return (text.includes('tcg low') || text.includes('tcgplayer low') || 
+                            text.includes('low price')) && text.includes('$');
+                });
                 
-                // Strategy 1: Try specific TCG Low selectors
-                for (const selector of tcgLowSelectors) {
-                    const element = document.querySelector(selector);
-                    if (element) {
-                        const price = extractPrice(element.textContent);
-                        if (price !== null) {
-                            result.tcg_price = price;
-                            result.debug_info.push(`TCG Low Price found with selector: ${selector} = $${price}`);
-                            break;
-                        }
+                // Find elements containing "Market Price" or similar
+                const marketPriceContainers = allElements.filter(el => {
+                    const text = el.textContent?.toLowerCase() || '';
+                    return (text.includes('market price') || text.includes('market') && text.includes('price') ||
+                            text.includes('tcg market') || text.includes('median')) && text.includes('$');
+                });
+                
+                result.debug_info.push(`Found ${tcgLowContainers.length} TCG Low containers, ${marketPriceContainers.length} Market Price containers`);
+                
+                // Extract TCG Low price
+                for (const container of tcgLowContainers) {
+                    const text = container.textContent;
+                    const price = extractPrice(text);
+                    if (price !== null) {
+                        result.tcg_price = price;
+                        result.debug_info.push(`TCG Low found in container: $${price} (${text.trim().substring(0, 50)}...)`);
+                        break;
                     }
                 }
                 
-                // Strategy 2: Try specific Market Price selectors
-                for (const selector of marketPriceSelectors) {
-                    const element = document.querySelector(selector);
-                    if (element) {
-                        const price = extractPrice(element.textContent);
-                        if (price !== null) {
-                            result.tcg_market_price = price;
-                            result.debug_info.push(`Market Price found with selector: ${selector} = $${price}`);
-                            break;
-                        }
+                // Extract Market Price
+                for (const container of marketPriceContainers) {
+                    const text = container.textContent;
+                    const price = extractPrice(text);
+                    if (price !== null) {
+                        result.tcg_market_price = price;
+                        result.debug_info.push(`Market Price found in container: $${price} (${text.trim().substring(0, 50)}...)`);
+                        break;
                     }
                 }
                 
-                // Strategy 3: Enhanced text-based extraction with context awareness
+                // Strategy 2: Try modern TCGPlayer 2025 specific selectors
                 if (!result.tcg_price || !result.tcg_market_price) {
-                    // Look for price sections with specific text patterns
-                    const priceContainers = Array.from(document.querySelectorAll('*')).filter(el => {
-                        const text = el.textContent?.toLowerCase() || '';
-                        return (text.includes('tcg low') || text.includes('market price') || 
-                                text.includes('median') || text.includes('tcg direct') ||
-                                text.includes('tcgplayer low') || text.includes('tcgplayer market')) &&
-                               text.includes('$') && el.offsetHeight > 0;
-                    });
+                    const modernSelectors = [
+                        // Latest TCGPlayer structure patterns
+                        { type: 'tcg_low', selectors: [
+                            '[data-testid*="low"]',
+                            '[aria-label*="low"]',
+                            '.price-point[class*="low"]',
+                            '.pricing-detail[class*="low"]',
+                            '.price-container[class*="low"]'
+                        ]},
+                        { type: 'market', selectors: [
+                            '[data-testid*="market"]',
+                            '[aria-label*="market"]', 
+                            '.price-point[class*="market"]',
+                            '.pricing-detail[class*="market"]',
+                            '.price-container[class*="market"]'
+                        ]}
+                    ];
                     
-                    result.debug_info.push(`Found ${priceContainers.length} potential price containers with labels`);
-                    
-                    for (const container of priceContainers) {
-                        const text = container.textContent;
-                        const lowerText = text.toLowerCase();
-                        const price = extractPrice(text);
+                    for (const selectorGroup of modernSelectors) {
+                        const isLookingForTcgLow = selectorGroup.type === 'tcg_low';
+                        const fieldName = isLookingForTcgLow ? 'tcg_price' : 'tcg_market_price';
                         
-                        if (price !== null && price > 0) {
-                            // More specific matching for TCG Low
-                            if ((lowerText.includes('tcg low') || lowerText.includes('tcgplayer low') || 
-                                 lowerText.includes('tcg direct')) && !result.tcg_price) {
-                                result.tcg_price = price;
-                                result.debug_info.push(`TCG Low from labeled container: $${price} (${text.trim().substring(0, 50)}...)`);
-                            }
-                            // More specific matching for Market Price
-                            else if ((lowerText.includes('market price') || lowerText.includes('tcgplayer market') ||
-                                     lowerText.includes('median')) && !result.tcg_market_price) {
-                                result.tcg_market_price = price;
-                                result.debug_info.push(`Market Price from labeled container: $${price} (${text.trim().substring(0, 50)}...)`);
-                            }
-                        }
-                    }
-                }
-                
-                // Strategy 4: Look for price elements in structured price lists/grids
-                if (!result.tcg_price || !result.tcg_market_price) {
-                    // Find price grid or list structures
-                    const priceGrids = Array.from(document.querySelectorAll('.price-grid, .price-list, .pricing-section, .price-container'));
-                    
-                    for (const grid of priceGrids) {
-                        const priceElements = Array.from(grid.querySelectorAll('*')).filter(el => {
-                            const text = el.textContent?.trim() || '';
-                            return text.match(/^\\$[\\d,]+(?:\\.\\d{2})?$/) && el.offsetHeight > 0;
-                        });
+                        if (result[fieldName] !== null) continue; // Skip if already found
                         
-                        if (priceElements.length >= 2) {
-                            const prices = priceElements.map(el => extractPrice(el.textContent)).filter(p => p !== null);
-                            if (prices.length >= 2) {
-                                const sortedPrices = [...new Set(prices)].sort((a, b) => a - b);
-                                if (!result.tcg_price) {
-                                    result.tcg_price = sortedPrices[0];
-                                    result.debug_info.push(`TCG Low from price grid (lowest): $${result.tcg_price}`);
+                        for (const selector of selectorGroup.selectors) {
+                            const elements = document.querySelectorAll(selector);
+                            for (const element of elements) {
+                                // Look for price within this element or its descendants
+                                const priceElements = Array.from(element.querySelectorAll('*')).concat([element]);
+                                for (const priceEl of priceElements) {
+                                    const price = extractPrice(priceEl.textContent);
+                                    if (price !== null) {
+                                        result[fieldName] = price;
+                                        result.debug_info.push(`${selectorGroup.type} price found with ${selector}: $${price}`);
+                                        break;
+                                    }
                                 }
-                                if (!result.tcg_market_price && sortedPrices.length > 1) {
-                                    result.tcg_market_price = sortedPrices[1];
-                                    result.debug_info.push(`Market Price from price grid (second): $${result.tcg_market_price}`);
-                                }
-                                break;
+                                if (result[fieldName] !== null) break;
                             }
+                            if (result[fieldName] !== null) break;
                         }
                     }
                 }
                 
-                // Strategy 5: Comprehensive fallback with stricter validation
+                // Strategy 3: Intelligent price discovery using DOM structure analysis  
                 if (!result.tcg_price || !result.tcg_market_price) {
-                    // Find all potential price elements
-                    const allPriceElements = Array.from(document.querySelectorAll('span, div, td, th')).filter(el => {
+                    // Find all price-like elements
+                    const allPriceElements = Array.from(document.querySelectorAll('*')).filter(el => {
                         const text = el.textContent?.trim() || '';
-                        return text.match(/^\\$[\\d,]+(?:\\.\\d{2})?$/) && 
-                               el.offsetHeight > 0 && el.offsetHeight < 100 && 
-                               el.offsetWidth > 0 && el.offsetWidth < 300;
+                        const hasPrice = text.match(/\\$[\\d,]+(?:\\.\\d{2})?/);
+                        return hasPrice && el.offsetHeight > 0 && el.offsetHeight < 100 && 
+                               el.offsetWidth > 0 && el.offsetWidth < 300 && 
+                               !el.querySelector('*'); // Leaf elements only
                     });
                     
-                    const foundPrices = [];
-                    allPriceElements.forEach(el => {
+                    // Group prices by their context/labels
+                    const pricesWithContext = [];
+                    for (const el of allPriceElements) {
                         const price = extractPrice(el.textContent);
-                        if (price !== null && price > 0 && price < 1000) {
-                            foundPrices.push({
-                                price: price,
-                                element: el,
-                                context: el.parentElement?.textContent?.substring(0, 100) || ''
-                            });
-                        }
-                    });
-                    
-                    // Remove duplicates and sort by price
-                    const uniquePrices = [];
-                    const seenPrices = new Set();
-                    foundPrices.forEach(item => {
-                        if (!seenPrices.has(item.price)) {
-                            seenPrices.add(item.price);
-                            uniquePrices.push(item);
-                        }
-                    });
-                    uniquePrices.sort((a, b) => a.price - b.price);
-                    
-                    result.debug_info.push(`Found ${uniquePrices.length} unique prices in fallback: [${uniquePrices.map(p => p.price).join(', ')}]`);
-                    
-                    if (uniquePrices.length >= 2) {
-                        // Use context to make better decisions
-                        for (let i = 0; i < uniquePrices.length && (!result.tcg_price || !result.tcg_market_price); i++) {
-                            const item = uniquePrices[i];
-                            const context = item.context.toLowerCase();
+                        if (price === null || price <= 0) continue;
+                        
+                        // Look for context clues in parent elements and siblings
+                        let context = '';
+                        let current = el;
+                        let depth = 0;
+                        
+                        while (current && depth < 5) {
+                            const siblings = Array.from(current.parentElement?.children || []);
+                            const parentText = current.parentElement?.textContent?.toLowerCase() || '';
                             
-                            // Assign based on context clues
-                            if ((context.includes('low') || context.includes('tcg')) && !result.tcg_price) {
-                                result.tcg_price = item.price;
-                                result.debug_info.push(`TCG Price assigned from context: $${item.price} (${context.substring(0, 30)}...)`);
-                            } else if ((context.includes('market') || context.includes('median')) && !result.tcg_market_price) {
-                                result.tcg_market_price = item.price;
-                                result.debug_info.push(`Market Price assigned from context: $${item.price} (${context.substring(0, 30)}...)`);
+                            // Check for label indicators in parent or siblings
+                            for (const sibling of siblings) {
+                                if (sibling !== current) {
+                                    const siblingText = sibling.textContent?.toLowerCase() || '';
+                                    if (siblingText.includes('tcg low') || siblingText.includes('low price')) {
+                                        context += ' tcg_low ';
+                                    }
+                                    if (siblingText.includes('market price') || siblingText.includes('market')) {
+                                        context += ' market ';
+                                    }
+                                }
                             }
+                            
+                            if (parentText.includes('tcg low') || parentText.includes('low price')) {
+                                context += ' tcg_low ';
+                            }
+                            if (parentText.includes('market price') || parentText.includes('market')) {
+                                context += ' market ';
+                            }
+                            
+                            current = current.parentElement;
+                            depth++;
                         }
                         
-                        // Final assignment if still missing prices
-                        if (!result.tcg_price) {
-                            result.tcg_price = uniquePrices[0].price;
-                            result.debug_info.push(`TCG Price set to lowest fallback: $${result.tcg_price}`);
+                        pricesWithContext.push({
+                            price: price,
+                            context: context.trim(),
+                            element: el
+                        });
+                    }
+                    
+                    result.debug_info.push(`Found ${pricesWithContext.length} prices with context analysis`);
+                    
+                    // Sort by price and assign based on context
+                    pricesWithContext.sort((a, b) => a.price - b.price);
+                    
+                    for (const item of pricesWithContext) {
+                        if (item.context.includes('tcg_low') && !result.tcg_price) {
+                            result.tcg_price = item.price;
+                            result.debug_info.push(`TCG Low assigned from context: $${item.price}`);
+                        } else if (item.context.includes('market') && !result.tcg_market_price) {
+                            result.tcg_market_price = item.price;
+                            result.debug_info.push(`Market Price assigned from context: $${item.price}`);
                         }
-                        if (!result.tcg_market_price && uniquePrices.length > 1) {
-                            result.tcg_market_price = uniquePrices[1].price;
-                            result.debug_info.push(`Market Price set to second fallback: $${result.tcg_market_price}`);
+                    }
+                    
+                    // If still missing, use heuristic based on typical TCG pattern
+                    if (!result.tcg_price && !result.tcg_market_price && pricesWithContext.length >= 2) {
+                        // Typically TCG Low is lower than Market Price
+                        const uniquePrices = [...new Set(pricesWithContext.map(p => p.price))].sort((a, b) => a - b);
+                        if (uniquePrices.length >= 2) {
+                            result.tcg_price = uniquePrices[0]; // Lower price = TCG Low
+                            result.tcg_market_price = uniquePrices[1]; // Higher price = Market
+                            result.debug_info.push(`Used heuristic: TCG Low $${result.tcg_price}, Market $${result.tcg_market_price}`);
                         }
-                    } else if (uniquePrices.length === 1) {
-                        // Only one price found - use for both but log this
-                        const singlePrice = uniquePrices[0].price;
-                        if (!result.tcg_price) result.tcg_price = singlePrice;
-                        if (!result.tcg_market_price) result.tcg_market_price = singlePrice;
-                        result.debug_info.push(`Only one price found, using for both: $${singlePrice}`);
                     }
                 }
                 
-                // Final validation
-                if (result.tcg_price && result.tcg_market_price && result.tcg_price === result.tcg_market_price) {
-                    result.debug_info.push(`WARNING: Both prices are identical ($${result.tcg_price}) - may indicate extraction issue`);
+                // Final fallback - if only one price type found, try to find the other
+                if ((!result.tcg_price || !result.tcg_market_price) && (result.tcg_price || result.tcg_market_price)) {
+                    // Find all remaining price elements that weren't already used
+                    const allPriceTexts = Array.from(document.querySelectorAll('*')).map(el => {
+                        const text = el.textContent?.trim() || '';
+                        const match = text.match(/\\$([\\d,]+(?:\\.\\d{2})?)/);
+                        return match ? parseFloat(match[1].replace(/,/g, '')) : null;
+                    }).filter(price => price !== null && price > 0 && price < 1000);
+                    
+                    const uniquePrices = [...new Set(allPriceTexts)].sort((a, b) => a - b);
+                    result.debug_info.push(`All found prices: [${uniquePrices.join(', ')}]`);
+                    
+                    const currentPrice = result.tcg_price || result.tcg_market_price;
+                    const otherPrices = uniquePrices.filter(p => p !== currentPrice);
+                    
+                    if (otherPrices.length > 0) {
+                        if (!result.tcg_price) {
+                            // Find a price lower than market price
+                            const lowerPrice = otherPrices.find(p => p < currentPrice);
+                            result.tcg_price = lowerPrice || otherPrices[0];
+                            result.debug_info.push(`TCG Low set to: $${result.tcg_price}`);
+                        }
+                        if (!result.tcg_market_price) {
+                            // Find a price higher than TCG low
+                            const higherPrice = otherPrices.find(p => p > currentPrice);
+                            result.tcg_market_price = higherPrice || otherPrices[otherPrices.length - 1];
+                            result.debug_info.push(`Market Price set to: $${result.tcg_market_price}`);
+                        }
+                    }
+                }
+                
+                // Final validation and logging
+                if (result.tcg_price && result.tcg_market_price) {
+                    if (result.tcg_price === result.tcg_market_price) {
+                        result.debug_info.push(`WARNING: Both prices are identical ($${result.tcg_price}) - may indicate extraction issue`);
+                    } else if (result.tcg_price > result.tcg_market_price) {
+                        result.debug_info.push(`WARNING: TCG Low ($${result.tcg_price}) > Market ($${result.tcg_market_price}) - unusual pattern`);
+                    } else {
+                        result.debug_info.push(`SUCCESS: TCG Low ($${result.tcg_price}) < Market ($${result.tcg_market_price}) - expected pattern`);
+                    }
+                } else {
+                    result.debug_info.push(`INCOMPLETE: TCG Low: $${result.tcg_price || 'null'}, Market: $${result.tcg_market_price || 'null'}`);
                 }
                 
                 return result;
