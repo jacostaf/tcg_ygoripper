@@ -1097,40 +1097,62 @@ async def select_best_tcgplayer_variant(
                 productLinks.forEach(link => {
                     const href = link.getAttribute('href');
                     
-                    // Try to get title from different possible locations
+                    // Extract comprehensive product information from the link
+                    let cardName = '';
+                    let setName = '';
+                    let rarity = '';
+                    let cardNumber = '';
+                    
+                    // Method 1: Extract from structured elements within the link
+                    const heading = link.querySelector('h4');  // Set name is in h4
+                    if (heading) {
+                        setName = heading.textContent?.trim() || '';
+                    }
+                    
+                    // Find generic elements that contain the card information
+                    const generics = link.querySelectorAll('generic');
+                    generics.forEach(generic => {
+                        const text = generic.textContent?.trim() || '';
+                        
+                        // Look for card number (starts with #)
+                        if (text.startsWith('#')) {
+                            cardNumber = text.replace('#', '').trim();
+                        }
+                        // Look for rarity (ends with "Rare," or contains rarity keywords)
+                        else if (text.includes('Rare,') || text.includes('Common,') || text.includes('Ultra,') || text.includes('Secret,') || text.includes('Quarter Century,')) {
+                            rarity = text.replace(',', '').trim();
+                        }
+                        // Look for card name (longer text, contains letters, not price/listing info)
+                        else if (text.length > 3 && /[a-zA-Z]/.test(text) && 
+                                !text.includes('listings') && !text.includes('$') && 
+                                !text.includes('Market Price:') && !text.includes('from') &&
+                                !text.startsWith('#') && text !== setName) {
+                            // This could be the card name - take the longest meaningful one
+                            if (text.length > cardName.length) {
+                                cardName = text;
+                            }
+                        }
+                    });
+                    
+                    // Build comprehensive title from extracted components
                     let title = '';
-                    
-                    // Method 1: Look for heading within the link
-                    const headingInLink = link.querySelector('h1, h2, h3, h4, h5, h6');
-                    if (headingInLink) {
-                        title = headingInLink.textContent?.trim() || '';
-                    }
-                    
-                    // Method 2: Look for generic elements with card names
-                    if (!title) {
-                        const genericElements = link.querySelectorAll('generic');
-                        for (const el of genericElements) {
-                            const text = el.textContent?.trim() || '';
-                            // Look for text that looks like a card name (contains letters and potentially special chars)
-                            if (text && text.length > 3 && /[a-zA-Z]/.test(text) && !text.startsWith('#') && !text.includes('listings') && !text.includes('$')) {
-                                title = text;
-                                break;
-                            }
+                    if (cardName) {
+                        title = cardName;
+                        if (setName) {
+                            title += ` - ${setName}`;
                         }
-                    }
-                    
-                    // Method 3: Get all text content and try to extract meaningful title
-                    if (!title) {
+                        if (rarity) {
+                            title += ` (${rarity})`;
+                        }
+                        if (cardNumber) {
+                            title += ` [${cardNumber}]`;
+                        }
+                    } else {
+                        // Fallback: use all text content and clean it up
                         const allText = link.textContent?.trim() || '';
-                        // Split by common separators and find the longest meaningful part
-                        const parts = allText.split(/\\n|Market Price:|listings from|#/);
-                        for (const part of parts) {
-                            const cleanPart = part.trim();
-                            if (cleanPart && cleanPart.length > 5 && /[a-zA-Z]/.test(cleanPart) && !cleanPart.includes('$')) {
-                                title = cleanPart;
-                                break;
-                            }
-                        }
+                        // Take first meaningful part before price info
+                        const parts = allText.split(/Market Price:|listings from|\$/);
+                        title = parts[0]?.trim() || '';
                     }
                     
                     if (href && title) {
@@ -1139,7 +1161,11 @@ async def select_best_tcgplayer_variant(
                         
                         variants.push({
                             title: title,
-                            href: fullHref
+                            href: fullHref,
+                            cardName: cardName,
+                            setName: setName,
+                            rarity: rarity,
+                            cardNumber: cardNumber
                         });
                     }
                 });
@@ -1170,41 +1196,75 @@ async def select_best_tcgplayer_variant(
             title_lower = variant['title'].lower()
             url_lower = variant['href'].lower()
             
-            # CRITICAL: Card number must appear in title or URL for a valid match
+            # Extract structured data
+            variant_card_name = variant.get('cardName', '').lower()
+            variant_card_number = variant.get('cardNumber', '').lower()
+            variant_rarity = variant.get('rarity', '').lower()
+            variant_set_name = variant.get('setName', '').lower()
+            
+            logger.info(f"Evaluating variant: {variant['title'][:80]}...")
+            logger.info(f"  Card Name: '{variant.get('cardName', 'N/A')}'")
+            logger.info(f"  Card Number: '{variant.get('cardNumber', 'N/A')}'")
+            logger.info(f"  Rarity: '{variant.get('rarity', 'N/A')}'")
+            logger.info(f"  Set: '{variant.get('setName', 'N/A')}'")
+            
+            # CRITICAL: Card number exact match
             card_number_found = False
             if card_number:
                 card_number_lower = card_number.lower()
-                if card_number_lower in title_lower or card_number_lower in url_lower:
+                # Check extracted card number first, then fallback to title/URL
+                if variant_card_number == card_number_lower:
                     card_number_found = True
-                    score += 200  # Very high score for card number presence
-                    logger.info(f"✓ Card number {card_number} found in {variant['title'][:50]}...")
+                    score += 300  # Highest score for exact card number match
+                    logger.info(f"✓ EXACT card number match: {card_number}")
+                elif card_number_lower in title_lower or card_number_lower in url_lower:
+                    card_number_found = True
+                    score += 200  # High score for card number in title/URL
+                    logger.info(f"✓ Card number {card_number} found in title/URL")
                 else:
                     # Heavily penalize variants without the target card number
-                    score -= 100
-                    logger.warning(f"✗ Card number {card_number} NOT found in {variant['title'][:50]}...")
+                    score -= 200
+                    logger.warning(f"✗ Card number {card_number} NOT found")
                     
-            # CRITICAL: Card name verification - all words must match
+            # CRITICAL: Card name verification
             card_name_perfect_match = False
             if card_name:
-                name_words = card_name.lower().split()
-                # Check if ALL words of the card name appear in the title
-                name_match_count = sum(1 for word in name_words if word in title_lower)
-                if name_match_count == len(name_words):
+                expected_name = card_name.lower()
+                # Check extracted card name first
+                if variant_card_name and expected_name == variant_card_name:
                     card_name_perfect_match = True
-                    score += 150  # Very high score for perfect card name match
-                    logger.info(f"✓ Perfect card name match for '{card_name}' in {variant['title'][:50]}...")
-                elif name_match_count > 0:
-                    score += (name_match_count / len(name_words)) * 50  # Reduced partial match score
-                    logger.info(f"⚠ Partial card name match ({name_match_count}/{len(name_words)}) for '{card_name}' in {variant['title'][:50]}...")
+                    score += 250  # Very high score for exact card name match
+                    logger.info(f"✓ EXACT card name match: '{card_name}'")
+                elif variant_card_name:
+                    # Check if all words of expected name are in extracted name
+                    name_words = expected_name.split()
+                    name_match_count = sum(1 for word in name_words if word in variant_card_name)
+                    if name_match_count == len(name_words):
+                        card_name_perfect_match = True
+                        score += 200  # High score for all words matching
+                        logger.info(f"✓ All words match in card name: '{card_name}'")
+                    elif name_match_count > 0:
+                        score += (name_match_count / len(name_words)) * 100
+                        logger.info(f"⚠ Partial card name match ({name_match_count}/{len(name_words)})")
+                    else:
+                        score -= 100
+                        logger.warning(f"✗ No card name match in extracted data")
                 else:
-                    # Penalize variants that don't match the card name at all
-                    score -= 50
-                    logger.warning(f"✗ No card name match for '{card_name}' in {variant['title'][:50]}...")
+                    # Fallback to checking title
+                    name_words = expected_name.split()
+                    name_match_count = sum(1 for word in name_words if word in title_lower)
+                    if name_match_count == len(name_words):
+                        card_name_perfect_match = True
+                        score += 150  # Good score for title match
+                        logger.info(f"✓ Card name words found in title")
+                    else:
+                        score -= 50
+                        logger.warning(f"✗ Incomplete card name match in title")
             
             # Only consider variants that have both card number and card name matches
             if not (card_number_found and card_name_perfect_match):
-                score -= 200  # Heavy penalty for missing critical matches
-                logger.warning(f"⚠ REJECTING variant (missing critical matches): {variant['title'][:50]}...")
+                score -= 300  # Heavy penalty for missing critical matches
+                logger.warning(f"⚠ REJECTING variant (missing critical matches)")
             
             # Verify this variant against our expected card info from MongoDB cache
             verification_result = None
@@ -1230,25 +1290,39 @@ async def select_best_tcgplayer_variant(
                 else:
                     logger.info(f"⚠ Cache verification failed for {variant['title'][:50]}... (confidence: {verification_result['confidence_score']})")
                 
-            # Score for rarity match
+            # Score for rarity match using extracted rarity data
             if card_rarity:
                 rarity_variants = normalize_rarity_for_matching(card_rarity)
                 rarity_found = False
-                for rarity_variant in rarity_variants:
-                    if rarity_variant.lower() in title_lower:
-                        score += 75  # Good score for rarity match
-                        rarity_found = True
-                        logger.info(f"✓ Rarity match for '{card_rarity}' in {variant['title'][:50]}...")
-                        break
+                
+                # First check extracted rarity data
+                if variant_rarity:
+                    for rarity_variant in rarity_variants:
+                        if rarity_variant.lower() in variant_rarity:
+                            score += 150  # High score for exact rarity match
+                            rarity_found = True
+                            logger.info(f"✓ EXACT rarity match: '{card_rarity}' matches '{variant.get('rarity', '')}'")
+                            break
+                
+                # Fallback to checking title if no extracted rarity or no match
                 if not rarity_found:
-                    logger.info(f"⚠ No rarity match for '{card_rarity}' in {variant['title'][:50]}...")
+                    for rarity_variant in rarity_variants:
+                        if rarity_variant.lower() in title_lower:
+                            score += 75  # Good score for rarity match in title
+                            rarity_found = True
+                            logger.info(f"✓ Rarity match for '{card_rarity}' found in title")
+                            break
+                
+                if not rarity_found:
+                    score -= 50  # Penalize missing rarity match
+                    logger.warning(f"✗ No rarity match for '{card_rarity}' (extracted: '{variant.get('rarity', 'N/A')}')")
             
             # Score for art variant match
             if target_art_version:
                 art_version = str(target_art_version).strip().lower()
                 if art_version in title_lower:
                     score += 25
-                    logger.info(f"✓ Art variant match for '{target_art_version}' in {variant['title'][:50]}...")
+                    logger.info(f"✓ Art variant match for '{target_art_version}'")
                     
             # Small bonus for detailed titles (but not a major factor)
             score += min(len(variant['title']) // 20, 5)
@@ -1266,15 +1340,37 @@ async def select_best_tcgplayer_variant(
             # CRITICAL VALIDATION: Do a final check that our selected variant actually matches our requirements
             best_title_lower = best_variant['title'].lower()
             best_url_lower = best_variant['href'].lower()
+            best_card_number = best_variant.get('cardNumber', '').lower()
+            best_card_name = best_variant.get('cardName', '').lower()
             
             # Verify card number is present
-            card_number_present = not card_number or (card_number.lower() in best_title_lower or card_number.lower() in best_url_lower)
+            card_number_present = True
+            if card_number:
+                card_number_lower = card_number.lower()
+                if best_card_number == card_number_lower:
+                    # Perfect match in extracted data
+                    pass
+                elif card_number_lower in best_title_lower or card_number_lower in best_url_lower:
+                    # Found in title or URL
+                    pass
+                else:
+                    card_number_present = False
             
             # Verify card name match if provided
             card_name_match = True
             if card_name:
-                name_words = card_name.lower().split()
-                card_name_match = all(word in best_title_lower for word in name_words)
+                expected_name = card_name.lower()
+                if best_card_name == expected_name:
+                    # Perfect match in extracted data
+                    pass
+                elif best_card_name:
+                    # Check if all words match in extracted name
+                    name_words = expected_name.split()
+                    card_name_match = all(word in best_card_name for word in name_words)
+                else:
+                    # Fallback to title check
+                    name_words = expected_name.split()
+                    card_name_match = all(word in best_title_lower for word in name_words)
             
             if not card_number_present:
                 logger.error(f"CRITICAL ERROR: Selected variant does not contain card number {card_number}")
@@ -1292,6 +1388,11 @@ async def select_best_tcgplayer_variant(
             logger.info(f"FINAL SELECTION - Score: {best_score}")
             logger.info(f"Title: {best_variant['title']}")
             logger.info(f"URL: {best_variant['href']}")
+            logger.info(f"Extracted Data:")
+            logger.info(f"  Card Name: '{best_variant.get('cardName', 'N/A')}'")
+            logger.info(f"  Card Number: '{best_variant.get('cardNumber', 'N/A')}'")
+            logger.info(f"  Rarity: '{best_variant.get('rarity', 'N/A')}'")
+            logger.info(f"  Set: '{best_variant.get('setName', 'N/A')}'")
             if expected_card_info:
                 logger.info(f"Expected from cache: {expected_card_info['card_name']} | {expected_card_info.get('set_rarity', 'Unknown rarity')}")
                 logger.info(f"Available rarities in cache: {expected_card_info['available_rarities']}")
