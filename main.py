@@ -562,33 +562,43 @@ def extract_set_code(card_number: str) -> Optional[str]:
     return None
 
 def extract_booster_set_name(source_url: str) -> Optional[str]:
-    """Extract booster set name from PriceCharting URL."""
+    """Extract booster set name from TCGPlayer URL."""
     if not source_url:
         return None
     
     try:
-        url_parts = source_url.split('/')
-        if (len(url_parts) >= 5 and 
-            'yugioh-' in url_parts[4] and 
-            'yugioh-prime' not in url_parts[4]):
+        # TCGPlayer URLs often contain set information in the path
+        # Example: https://www.tcgplayer.com/product/626754/yugioh-quarter-century-stampede-black-metal-dragon-secret-rare
+        
+        # Extract set name from URL path
+        import re
+        
+        # Look for yugioh-{set-name} pattern in TCGPlayer URLs
+        set_match = re.search(r'/yugioh-([^/]+?)(?:-[^-/]*?-(?:secret|ultra|super|rare|common))', source_url, re.IGNORECASE)
+        if set_match:
+            set_name = set_match.group(1)
+            # Clean and format set name
+            set_name = set_name.replace('-', ' ').title()
+            # Handle specific known abbreviations
+            if 'quarter-century' in set_name.lower() or 'quarter century' in set_name.lower():
+                return 'Quarter Century Stampede'
+            return set_name
             
-            game_slug = url_parts[4]
-            set_slug = game_slug.replace('yugioh-', '')
-            words = set_slug.split('-')
-            
-            readable_words = []
-            for word in words:
-                if word.lower() in ['of', 'the', 'and']:
-                    readable_words.append(word.lower())
-                else:
-                    readable_words.append(word.capitalize())
-            
-            return ' '.join(readable_words)
-            
+        # Fallback: look for any meaningful set identifier in the URL
+        path_parts = source_url.split('/')
+        for part in path_parts:
+            if 'yugioh-' in part.lower() and len(part) > 10:
+                set_candidate = part.replace('yugioh-', '').replace('-', ' ').title()
+                # Remove card-specific terms
+                set_candidate = re.sub(r'\b(Secret|Ultra|Super|Rare|Common)\b.*$', '', set_candidate, flags=re.IGNORECASE).strip()
+                if len(set_candidate) > 3:  # Avoid single words
+                    return set_candidate
+                    
+        return None
+        
     except Exception as e:
-        logger.error(f"Error extracting booster set name: {e}")
-    
-    return None
+        logger.error(f"Error extracting booster set name from URL {source_url}: {e}")
+        return None
 
 async def select_best_tcgplayer_variant(
     page, 
