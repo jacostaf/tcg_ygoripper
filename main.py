@@ -1087,7 +1087,7 @@ async def select_best_tcgplayer_variant(
         logger.info("="*80)
         
         # Extract all product links from TCGPlayer search results
-        variants = await page.evaluate("""
+        variants = await page.evaluate(r"""
             () => {
                 const variants = [];
                 
@@ -1290,32 +1290,48 @@ async def select_best_tcgplayer_variant(
                 else:
                     logger.info(f"⚠ Cache verification failed for {variant['title'][:50]}... (confidence: {verification_result['confidence_score']})")
                 
-            # Score for rarity match using extracted rarity data
+            # Score for rarity match - use strict exact matching for better precision
             if card_rarity:
-                rarity_variants = normalize_rarity_for_matching(card_rarity)
+                target_rarity_normalized = normalize_rarity(card_rarity).lower().strip()
                 rarity_found = False
+                rarity_score = 0
                 
-                # First check extracted rarity data
+                # First check extracted rarity data for exact match
                 if variant_rarity:
-                    for rarity_variant in rarity_variants:
-                        if rarity_variant.lower() in variant_rarity:
-                            score += 150  # High score for exact rarity match
-                            rarity_found = True
-                            logger.info(f"✓ EXACT rarity match: '{card_rarity}' matches '{variant.get('rarity', '')}'")
-                            break
+                    variant_rarity_normalized = normalize_rarity(variant_rarity).lower().strip()
+                    
+                    if variant_rarity_normalized == target_rarity_normalized:
+                        # Perfect exact rarity match - highest score
+                        rarity_score = 400
+                        rarity_found = True
+                        logger.info(f"✓ PERFECT rarity match: '{card_rarity}' == '{variant.get('rarity', '')}'")
+                    elif target_rarity_normalized in variant_rarity_normalized or variant_rarity_normalized in target_rarity_normalized:
+                        # Partial match - much lower score
+                        rarity_score = 100
+                        rarity_found = True
+                        logger.info(f"⚠ Partial rarity match: '{card_rarity}' ~= '{variant.get('rarity', '')}'")
+                    else:
+                        # Different rarity - penalty
+                        rarity_score = -150
+                        logger.warning(f"✗ Rarity mismatch: '{card_rarity}' != '{variant.get('rarity', '')}'")
                 
-                # Fallback to checking title if no extracted rarity or no match
+                # Fallback to checking title if no extracted rarity data
                 if not rarity_found:
+                    # Generate all possible variations for flexible matching in title
+                    rarity_variants = normalize_rarity_for_matching(card_rarity)
+                    
                     for rarity_variant in rarity_variants:
                         if rarity_variant.lower() in title_lower:
-                            score += 75  # Good score for rarity match in title
+                            rarity_score = 75  # Lower score for title-based match
                             rarity_found = True
                             logger.info(f"✓ Rarity match for '{card_rarity}' found in title")
                             break
                 
                 if not rarity_found:
-                    score -= 50  # Penalize missing rarity match
+                    rarity_score = -75  # Penalize missing rarity match
                     logger.warning(f"✗ No rarity match for '{card_rarity}' (extracted: '{variant.get('rarity', 'N/A')}')")
+                
+                score += rarity_score
             
             # Score for art variant match
             if target_art_version:
@@ -1560,41 +1576,56 @@ async def extract_prices_from_tcgplayer_dom(page) -> Dict[str, Any]:
     try:
         prices = await page.evaluate("""
             () => {
-                // Helper function to extract price from text
+                // Helper function to extract price from text with better validation
                 const extractPrice = (text) => {
                     if (!text) return null;
-                    const match = text.match(/\\$?([\\d,.]+)/);
-                    return match ? parseFloat(match[1].replace(/,/g, '')) : null;
+                    // Look for currency amounts, handle comma separators
+                    const match = text.match(/\\$([\\d,]+(?:\\.\\d{2})?)/);
+                    if (match) {
+                        const price = parseFloat(match[1].replace(/,/g, ''));
+                        // Validate price range (reasonable for TCG cards)
+                        return (price >= 0.01 && price <= 10000) ? price : null;
+                    }
+                    return null;
                 };
                 
                 const result = {
                     tcg_price: null,
-                    tcg_market_price: null
+                    tcg_market_price: null,
+                    debug_info: []
                 };
                 
-                // Look for price elements in various TCGPlayer structures
+                // TCGPlayer 2024+ specific selectors - more accurate
                 const priceSelectors = [
+                    // Modern TCGPlayer structure
                     '[data-testid="product-price"]',
-                    '.product-price',
-                    '.price-point',
-                    '.market-price',
-                    '.tcg-price'
+                    '[data-testid="tcg-low-price"]',
+                    '[data-testid="listing-price"]',
+                    '.product-listing__price',
+                    '.product-price__low',
+                    '.price-point__price',
+                    '.tcg-price',
+                    '.listing-item__price'
                 ];
                 
                 const marketPriceSelectors = [
+                    // Market price specific selectors
                     '[data-testid="market-price"]',
-                    '.market-price-value',
-                    '.market-price .price',
+                    '[data-testid="tcg-market-price"]',
+                    '.market-price__value',
+                    '.product-price__market',
+                    '.price-point__market',
                     '.tcg-market-price'
                 ];
                 
-                // Try to find TCG price
+                // Try to find low/TCG price first
                 for (const selector of priceSelectors) {
                     const element = document.querySelector(selector);
                     if (element) {
                         const price = extractPrice(element.textContent);
-                        if (price) {
+                        if (price !== null) {
                             result.tcg_price = price;
+                            result.debug_info.push(`TCG Price found with selector: ${selector} = $${price}`);
                             break;
                         }
                     }
@@ -1605,44 +1636,92 @@ async def extract_prices_from_tcgplayer_dom(page) -> Dict[str, Any]:
                     const element = document.querySelector(selector);
                     if (element) {
                         const price = extractPrice(element.textContent);
-                        if (price) {
+                        if (price !== null) {
                             result.tcg_market_price = price;
+                            result.debug_info.push(`Market Price found with selector: ${selector} = $${price}`);
                             break;
                         }
                     }
                 }
                 
-                // Fallback: look for any price elements and use heuristics
+                // Enhanced fallback: look for labeled price sections
+                if (!result.tcg_price || !result.tcg_market_price) {
+                    // Look for labeled price containers
+                    const labeledContainers = Array.from(document.querySelectorAll('*')).filter(el => {
+                        const text = el.textContent?.toLowerCase() || '';
+                        return (text.includes('market price') || text.includes('tcg low') || 
+                                text.includes('median') || text.includes('low price')) && 
+                               text.includes('$');
+                    });
+                    
+                    labeledContainers.forEach(container => {
+                        const text = container.textContent;
+                        const price = extractPrice(text);
+                        if (price !== null) {
+                            if (text.toLowerCase().includes('market')) {
+                                if (!result.tcg_market_price) {
+                                    result.tcg_market_price = price;
+                                    result.debug_info.push(`Market price from labeled container: $${price}`);
+                                }
+                            } else if (text.toLowerCase().includes('low') || text.toLowerCase().includes('tcg')) {
+                                if (!result.tcg_price) {
+                                    result.tcg_price = price;
+                                    result.debug_info.push(`Low price from labeled container: $${price}`);
+                                }
+                            }
+                        }
+                    });
+                }
+                
+                // Final fallback: intelligent price selection from all prices
                 if (!result.tcg_price || !result.tcg_market_price) {
                     const allPriceElements = Array.from(document.querySelectorAll(
-                        '*[class*="price"], *[data-testid*="price"], .price-text, .price-value'
+                        '*[class*="price"], *[data-testid*="price"], *:contains("$")'
                     ));
                     
                     const prices = [];
                     allPriceElements.forEach(el => {
                         const price = extractPrice(el.textContent);
-                        if (price && price > 0) {
+                        if (price !== null && price > 0) {
                             prices.push(price);
                         }
                     });
                     
-                    // Use distinct prices - typically TCGPlayer shows multiple price points
+                    // Remove duplicates and sort
                     const uniquePrices = [...new Set(prices)].sort((a, b) => a - b);
+                    result.debug_info.push(`Found ${uniquePrices.length} unique prices: [${uniquePrices.join(', ')}]`);
                     
                     if (uniquePrices.length >= 2) {
-                        // First price is usually the low/tcg price, higher price is market
-                        if (!result.tcg_price) result.tcg_price = uniquePrices[0];
-                        if (!result.tcg_market_price) result.tcg_market_price = uniquePrices[uniquePrices.length - 1];
+                        // Use intelligent price assignment based on typical TCGPlayer structure
+                        // Usually: lowest = TCG Low, highest or second-highest = Market
+                        if (!result.tcg_price) {
+                            result.tcg_price = uniquePrices[0]; // Lowest price
+                            result.debug_info.push(`Using lowest price as TCG price: $${result.tcg_price}`);
+                        }
+                        if (!result.tcg_market_price) {
+                            // Use highest reasonable price (not outliers)
+                            const marketPrice = uniquePrices.length > 2 ? uniquePrices[1] : uniquePrices[uniquePrices.length - 1];
+                            result.tcg_market_price = marketPrice;
+                            result.debug_info.push(`Using market price: $${result.tcg_market_price}`);
+                        }
                     } else if (uniquePrices.length === 1) {
-                        // If only one price, use it for both
-                        if (!result.tcg_price) result.tcg_price = uniquePrices[0];
-                        if (!result.tcg_market_price) result.tcg_market_price = uniquePrices[0];
+                        // Only one price found - use for both
+                        const singlePrice = uniquePrices[0];
+                        if (!result.tcg_price) result.tcg_price = singlePrice;
+                        if (!result.tcg_market_price) result.tcg_market_price = singlePrice;
+                        result.debug_info.push(`Only one price found, using for both: $${singlePrice}`);
                     }
                 }
                 
                 return result;
             }
         """)
+        
+        if prices:
+            # Log debug info for price extraction
+            debug_info = prices.get('debug_info', [])
+            for info in debug_info:
+                logger.info(f"Price extraction: {info}")
         
         return prices
         
