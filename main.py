@@ -107,6 +107,7 @@ class CardPriceModel(BaseModel):
     
     # Pricing data fields
     tcg_price: Optional[float] = Field(None, description="TCGPlayer price")
+    tcg_market_price: Optional[float] = Field(None, description="TCGPlayer market price")
     pc_ungraded_price: Optional[float] = Field(None, description="PriceCharting ungraded price")
     pc_grade7: Optional[float] = Field(None, description="PriceCharting Grade 7 price")
     pc_grade8: Optional[float] = Field(None, description="PriceCharting Grade 8 price")
@@ -309,6 +310,7 @@ def find_cached_price_data_sync(
             "booster_set_name": 1,
             "set_code": 1,
             "tcg_price": 1,
+            "tcg_market_price": 1,
             "pc_ungraded_price": 1,
             "pc_grade7": 1,
             "pc_grade8": 1,
@@ -588,6 +590,107 @@ def extract_booster_set_name(source_url: str) -> Optional[str]:
     
     return None
 
+async def select_best_tcgplayer_variant(
+    page, 
+    card_number: str, 
+    card_name: Optional[str], 
+    card_rarity: Optional[str], 
+    target_art_version: Optional[str]
+) -> Optional[str]:
+    """Select best card variant from TCGPlayer search results."""
+    try:
+        logger.info("="*80)
+        logger.info("STARTING TCGPLAYER VARIANT SELECTION")
+        logger.info(f"Target Card Number: {card_number}")
+        logger.info(f"Target Rarity: {card_rarity}")
+        logger.info(f"Target Art Version: {target_art_version}")
+        logger.info("="*80)
+        
+        # Extract all product links from TCGPlayer search results
+        variants = await page.evaluate("""
+            () => {
+                const variants = [];
+                
+                // TCGPlayer search results are in product cards
+                const productCards = Array.from(document.querySelectorAll(
+                    '.search-result-item, .product-item, [data-testid="product-card"], .product-card'
+                ));
+                
+                productCards.forEach(card => {
+                    const titleElement = card.querySelector('a[href*="/product/"], .product-title a, .product-name a, h2 a');
+                    if (!titleElement) return;
+                    
+                    const href = titleElement.getAttribute('href');
+                    const title = titleElement.textContent?.trim() || '';
+                    
+                    if (href && title) {
+                        // Make sure href is absolute
+                        const fullHref = href.startsWith('http') ? href : `https://www.tcgplayer.com${href}`;
+                        
+                        variants.push({
+                            title: title,
+                            href: fullHref
+                        });
+                    }
+                });
+                
+                return variants;
+            }
+        """)
+
+        if not variants:
+            logger.warning("No variants found in TCGPlayer search results")
+            return None
+            
+        logger.info(f"Found {len(variants)} variants to check")
+        
+        # Score variants based on card number, rarity, and art variant matches
+        scored_variants = []
+        
+        for variant in variants:
+            score = 0
+            title_lower = variant['title'].lower()
+            
+            # High score for exact card number match
+            if card_number.lower() in title_lower:
+                score += 100
+                
+            # Score for rarity match
+            if card_rarity:
+                rarity_variants = normalize_rarity_for_matching(card_rarity)
+                for rarity_variant in rarity_variants:
+                    if rarity_variant.lower() in title_lower:
+                        score += 50
+                        break
+            
+            # Score for art variant match
+            if target_art_version:
+                art_version = str(target_art_version).strip().lower()
+                if art_version in title_lower:
+                    score += 25
+                    
+            # Prefer products with more detailed titles (likely to have correct variants)
+            score += min(len(variant['title']) // 10, 10)
+            
+            scored_variants.append((score, variant))
+            logger.info(f"Variant: {variant['title'][:80]}... Score: {score}")
+        
+        # Sort by score and return the best match
+        scored_variants.sort(reverse=True, key=lambda x: x[0])
+        
+        if scored_variants and scored_variants[0][0] > 0:
+            best_variant = scored_variants[0][1]
+            logger.info(f"Selected best variant with score {scored_variants[0][0]}: {best_variant['title']}")
+            return best_variant['href']
+        else:
+            logger.warning("No suitable variant found based on scoring")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error selecting TCGPlayer variant: {e}")
+        return None
+
+
 async def select_best_card_variant(
     page, 
     card_number: str, 
@@ -735,6 +838,197 @@ async def select_best_card_variant(
         logger.error(f"Error selecting card variant: {e}")
         return None
 
+async def extract_prices_from_tcgplayer_dom(page) -> Dict[str, Any]:
+    """Extract price data from TCGPlayer product page DOM."""
+    try:
+        prices = await page.evaluate("""
+            () => {
+                // Helper function to extract price from text
+                const extractPrice = (text) => {
+                    if (!text) return null;
+                    const match = text.match(/\\$?([\\d,.]+)/);
+                    return match ? parseFloat(match[1].replace(/,/g, '')) : null;
+                };
+                
+                const result = {
+                    tcg_price: null,
+                    tcg_market_price: null
+                };
+                
+                // Look for price elements in various TCGPlayer structures
+                const priceSelectors = [
+                    '[data-testid="product-price"]',
+                    '.product-price',
+                    '.price-point',
+                    '.market-price',
+                    '.tcg-price'
+                ];
+                
+                const marketPriceSelectors = [
+                    '[data-testid="market-price"]',
+                    '.market-price-value',
+                    '.market-price .price',
+                    '.tcg-market-price'
+                ];
+                
+                // Try to find TCG price
+                for (const selector of priceSelectors) {
+                    const element = document.querySelector(selector);
+                    if (element) {
+                        const price = extractPrice(element.textContent);
+                        if (price) {
+                            result.tcg_price = price;
+                            break;
+                        }
+                    }
+                }
+                
+                // Try to find market price
+                for (const selector of marketPriceSelectors) {
+                    const element = document.querySelector(selector);
+                    if (element) {
+                        const price = extractPrice(element.textContent);
+                        if (price) {
+                            result.tcg_market_price = price;
+                            break;
+                        }
+                    }
+                }
+                
+                // Fallback: look for any price elements and use heuristics
+                if (!result.tcg_price || !result.tcg_market_price) {
+                    const allPriceElements = Array.from(document.querySelectorAll(
+                        '*[class*="price"], *[data-testid*="price"], .price-text, .price-value'
+                    ));
+                    
+                    const prices = [];
+                    allPriceElements.forEach(el => {
+                        const price = extractPrice(el.textContent);
+                        if (price && price > 0) {
+                            prices.push(price);
+                        }
+                    });
+                    
+                    // Use distinct prices - typically TCGPlayer shows multiple price points
+                    const uniquePrices = [...new Set(prices)].sort((a, b) => a - b);
+                    
+                    if (uniquePrices.length >= 2) {
+                        // First price is usually the low/tcg price, higher price is market
+                        if (!result.tcg_price) result.tcg_price = uniquePrices[0];
+                        if (!result.tcg_market_price) result.tcg_market_price = uniquePrices[uniquePrices.length - 1];
+                    } else if (uniquePrices.length === 1) {
+                        // If only one price, use it for both
+                        if (!result.tcg_price) result.tcg_price = uniquePrices[0];
+                        if (!result.tcg_market_price) result.tcg_market_price = uniquePrices[0];
+                    }
+                }
+                
+                return result;
+            }
+        """)
+        
+        return prices
+        
+    except Exception as e:
+        logger.error(f"Error extracting prices from TCGPlayer DOM: {e}")
+        return {}
+
+
+async def extract_rarity_from_tcgplayer_page(page) -> tuple[Optional[str], Optional[str]]:
+    """Extract rarity and art variant information directly from TCGPlayer product page.
+    Returns: Tuple of (rarity, art_variant)"""
+    try:
+        result = await page.evaluate("""
+            () => {
+                // Look for rarity information in various TCGPlayer page elements
+                const raritySelectors = [
+                    '[data-testid="product-rarity"]',
+                    '.product-rarity',
+                    '.rarity',
+                    '.product-details .rarity'
+                ];
+                
+                let foundRarity = null;
+                let foundArtVariant = null;
+                
+                // Try specific rarity selectors first
+                for (const selector of raritySelectors) {
+                    const element = document.querySelector(selector);
+                    if (element) {
+                        const text = element.textContent.trim();
+                        if (text) {
+                            foundRarity = text;
+                            break;
+                        }
+                    }
+                }
+                
+                // If no specific rarity element found, search in product title/description
+                if (!foundRarity) {
+                    const titleElement = document.querySelector('h1[data-testid="product-name"], .product-title h1, h1');
+                    if (titleElement) {
+                        const titleText = titleElement.textContent;
+                        
+                        // Common YuGiOh rarity patterns
+                        const rarityPatterns = [
+                            /quarter\\s+century\\s+secret\\s+rare/i,
+                            /platinum\\s+secret\\s+rare/i,
+                            /secret\\s+rare/i,
+                            /ultra\\s+rare/i,
+                            /super\\s+rare/i,
+                            /rare/i,
+                            /common/i
+                        ];
+                        
+                        for (const pattern of rarityPatterns) {
+                            const match = titleText.match(pattern);
+                            if (match) {
+                                foundRarity = match[0];
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                // Try to extract art variant from title
+                const titleElement = document.querySelector('h1[data-testid="product-name"], .product-title h1, h1');
+                if (titleElement) {
+                    const titleText = titleElement.textContent;
+                    
+                    // Art variant patterns
+                    const artPatterns = [
+                        /(\\d+)(st|nd|rd|th)\\s+art/i,
+                        /quarter\\s+century/i,
+                        /platinum/i
+                    ];
+                    
+                    for (const pattern of artPatterns) {
+                        const match = titleText.match(pattern);
+                        if (match) {
+                            foundArtVariant = match[0];
+                            break;
+                        }
+                    }
+                }
+                
+                return [foundRarity, foundArtVariant];
+            }
+        """)
+        
+        rarity, art_variant = result if result else (None, None)
+        
+        if rarity:
+            logger.info(f"Extracted rarity from TCGPlayer page: {rarity}")
+        if art_variant:
+            logger.info(f"Extracted art variant from TCGPlayer page: {art_variant}")
+            
+        return (rarity, art_variant)
+        
+    except Exception as e:
+        logger.error(f"Error extracting rarity from TCGPlayer page: {e}")
+        return (None, None)
+
+
 async def extract_prices_from_dom(page) -> Dict[str, Any]:
     """Extract price data from PriceCharting product page DOM."""
     try:
@@ -818,13 +1112,13 @@ async def extract_prices_from_dom(page) -> Dict[str, Any]:
         logger.error(f"Error extracting prices from DOM: {e}")
         return {}
 
-async def scrape_price_from_pricecharting(
+async def scrape_price_from_tcgplayer(
     card_number: str,
     card_name: Optional[str] = None,
     card_rarity: Optional[str] = None,
     art_variant: Optional[str] = None
 ) -> Optional[Dict]:
-    """Scrape price data from pricecharting.com using Playwright."""
+    """Scrape price data from TCGPlayer.com using Playwright."""
     try:
         from playwright.async_api import async_playwright
         
@@ -839,19 +1133,20 @@ async def scrape_price_from_pricecharting(
             )
             page = await context.new_page()
             
-            # Search using card number
-            search_query = card_number.strip()
-            search_url = f"https://www.pricecharting.com/search-products?q={quote(search_query)}&type=prices"
+            # Search using card number/name on TCGPlayer
+            # Use card name if provided, otherwise use card number
+            search_query = card_name.strip() if card_name else card_number.strip()
+            search_url = f"https://www.tcgplayer.com/search/yugioh/product?Language=English&productLineName=yugioh&q={quote(search_query)}&view=grid"
             
-            logger.info(f"Searching PriceCharting for: {search_query}")
+            logger.info(f"Searching TCGPlayer for: {search_query}")
             await page.goto(search_url, wait_until='networkidle', timeout=60000)
             
-            # Check if we landed directly on a product page
-            is_product_page = await page.evaluate("() => document.getElementById('product_name') !== null")
+            # Check if we landed directly on a product page or on search results
+            is_product_page = await page.evaluate("() => document.querySelector('.product-details, .product-title, h1[data-testid=\"product-name\"]') !== null")
             
             if not is_product_page:
                 # We're on search results, select best variant
-                best_variant_url = await select_best_card_variant(
+                best_variant_url = await select_best_tcgplayer_variant(
                     page, card_number, card_name, card_rarity, art_variant
                 )
                 
@@ -866,33 +1161,41 @@ async def scrape_price_from_pricecharting(
             # Get final page URL
             final_url = page.url
             
-            # Extract clean card name from page title
+            # Extract clean card name from TCGPlayer page
             page_title = await page.evaluate("""
                 () => {
-                    // Try to get the product name first
-                    const productName = document.getElementById('product_name');
-                    if (productName) {
-                        let name = productName.textContent.trim();
-                        // Clean up the product name
-                        name = name
-                            .replace(/\[(.*?)\]/g, '')  // Remove anything in square brackets
-                            .replace(/\s*SUDA-[A-Z]{2}\d+\s*/g, '')  // Remove card number
-                            .replace(/\s+/g, ' ')  // Normalize spaces
-                            .trim();
-                        return name;
+                    // Try to get the product name from various TCGPlayer selectors
+                    const selectors = [
+                        'h1[data-testid="product-name"]',
+                        '.product-title h1',
+                        '.product-details h1',
+                        'h1.product-name',
+                        '.product-header h1'
+                    ];
+                    
+                    for (const selector of selectors) {
+                        const element = document.querySelector(selector);
+                        if (element) {
+                            let name = element.textContent.trim();
+                            // Clean up the product name
+                            name = name
+                                .replace(/\[(.*?)\]/g, '')  // Remove anything in square brackets
+                                .replace(/\s+/g, ' ')  // Normalize spaces
+                                .trim();
+                            return name;
+                        }
                     }
                     
                     // Fallback to page title
                     const title = document.title;
                     if (!title) return '';
                     
-                    // Clean up the title
+                    // Clean up the title for TCGPlayer
                     let cleanTitle = title
-                        .replace(/Prices \| YuGiOh/g, '')
-                        .replace(/\| YuGiOh Cards/g, '')
-                        .replace(/Price Guide/g, '')
+                        .replace(/\| TCGPlayer/g, '')
+                        .replace(/\| YuGiOh/g, '')
+                        .replace(/TCGPlayer/g, '')
                         .replace(/\[(.*?)\]/g, '')  // Remove anything in square brackets
-                        .replace(/\s*SUDA-[A-Z]{2}\d+\s*/g, '')  // Remove card number
                         .replace(/\s+/g, ' ')  // Normalize spaces
                         .trim();
                         
@@ -906,12 +1209,12 @@ async def scrape_price_from_pricecharting(
                 # Also try extracting from URL
                 actual_art_variant = extract_art_version(final_url)
             
-            # Extract and validate rarity
+            # Extract and validate rarity directly from TCGPlayer page
             detected_rarity = None
             detected_art = None
             if card_rarity:
-                # Try to extract rarity from TCGPlayer first
-                tcg_result = await extract_rarity_from_tcgplayer(page)
+                # Extract rarity directly from TCGPlayer page
+                tcg_result = await extract_rarity_from_tcgplayer_page(page)
                 tcg_rarity, tcg_art = tcg_result if tcg_result else (None, None)
                 
                 if tcg_rarity:
@@ -936,8 +1239,8 @@ async def scrape_price_from_pricecharting(
             # otherwise use what we extracted from title or URL, or fall back to provided one
             final_art_variant = detected_art if detected_art else (actual_art_variant if actual_art_variant else art_variant)
             
-            # Extract prices from the product page
-            price_data = await extract_prices_from_dom(page)
+            # Extract prices from the TCGPlayer product page
+            price_data = await extract_prices_from_tcgplayer_dom(page)
             
             # Extract set code and booster set name
             set_code = extract_set_code(card_number)
@@ -945,7 +1248,7 @@ async def scrape_price_from_pricecharting(
             
             await browser.close()
             
-            # Create price record with clean data
+            # Create price record with clean data matching expected output format
             price_record = {
                 "card_number": card_number,
                 "card_name": page_title,  # Use cleaned page title
@@ -953,13 +1256,8 @@ async def scrape_price_from_pricecharting(
                 "card_rarity": final_rarity,  # Use detected or requested rarity
                 "set_code": set_code,
                 "booster_set_name": booster_set_name,
-                "tcg_price": price_data.get('tcgPlayerPrice'),
-                "pc_ungraded_price": price_data.get('marketPrice'),
-                "pc_grade7": price_data.get('allGradePrices', {}).get('Grade 7'),
-                "pc_grade8": price_data.get('allGradePrices', {}).get('Grade 8'),
-                "pc_grade9": price_data.get('allGradePrices', {}).get('Grade 9'),
-                "pc_grade9_5": price_data.get('allGradePrices', {}).get('Grade 9.5'),
-                "pc_grade10": price_data.get('allGradePrices', {}).get('PSA 10'),
+                "tcg_price": price_data.get('tcg_price'),
+                "tcg_market_price": price_data.get('tcg_market_price'),
                 "source_url": final_url,
                 "scrape_success": True,
                 "last_price_updt": datetime.now(UTC)
@@ -982,7 +1280,7 @@ async def scrape_price_from_pricecharting(
 # Card price scraping endpoint
 @app.route('/cards/price', methods=['POST'])
 def scrape_card_price():
-    """Scrape price data for a specific card from PriceCharting."""
+    """Scrape price data for a specific card from TCGPlayer."""
     try:
         data = request.get_json()
         
@@ -1079,7 +1377,7 @@ def scrape_card_price():
         
         # Scrape fresh data using async function
         async def scrape_data():
-            return await scrape_price_from_pricecharting(
+            return await scrape_price_from_tcgplayer(
                 card_number=card_number,
                 card_name=card_name,
                 card_rarity=card_rarity,
