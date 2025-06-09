@@ -877,18 +877,46 @@ def verify_card_match(
     expected_name = expected_card_info.get('card_name', '')
     available_rarities = expected_card_info.get('available_rarities', [])
     
-    # Check name match
+    # Check name match - be very strict about the actual card name matching
     if expected_name and tcg_card_name:
-        expected_words = set(expected_name.lower().split())
-        tcg_words = set(tcg_card_name.lower().split())
+        # Extract the core card name from both (before any set/variant info)
+        expected_core = expected_name.lower().strip()
+        tcg_core = tcg_card_name.lower().strip()
         
-        # Calculate name similarity
-        common_words = expected_words.intersection(tcg_words)
-        if common_words:
-            name_similarity = len(common_words) / max(len(expected_words), len(tcg_words))
-            if name_similarity >= 0.7:  # 70% word overlap
+        # Remove set information from TCG name for cleaner comparison
+        # Split at common separators and take the first part
+        for separator in [' - ', ' (', ' |', '  ']:
+            if separator in tcg_core:
+                tcg_core = tcg_core.split(separator)[0].strip()
+                break
+        
+        # For a perfect match, the expected card name should be contained in or very close to the TCG name
+        expected_words = [word for word in expected_core.split() if len(word) > 2]  # Skip small words
+        tcg_words = [word for word in tcg_core.split() if len(word) > 2]
+        
+        # Check if all significant words from expected name appear in order in TCG name
+        expected_word_set = set(expected_words)
+        tcg_word_set = set(tcg_words)
+        
+        # Calculate exact matching score
+        common_words = expected_word_set.intersection(tcg_word_set)
+        
+        # Require ALL expected words to be present for a match (very strict)
+        if len(common_words) == len(expected_word_set) and len(expected_word_set) > 0:
+            # Additional check: make sure we don't have conflicting key words
+            # (e.g., "Skull" vs "Metal" are conflicting descriptors)
+            conflicting_words = tcg_word_set - expected_word_set
+            key_conflicts = {'skull', 'rose', 'flame', 'white', 'blue', 'red'} & conflicting_words
+            
+            if not key_conflicts:  # No conflicting descriptive words
                 verification_result['name_match'] = True
-                verification_result['confidence_score'] += 40
+                verification_result['confidence_score'] += 50
+                logger.debug(f"✓ Perfect name match: expected '{expected_name}' matches TCG '{tcg_card_name}'")
+            else:
+                logger.debug(f"✗ Conflicting words detected: {key_conflicts} in '{tcg_card_name}' vs expected '{expected_name}'")
+        else:
+            missing_words = expected_word_set - common_words
+            logger.debug(f"✗ Insufficient name match: missing words {missing_words} from expected '{expected_name}' in TCG '{tcg_card_name}'")
     
     # Check rarity match
     if target_rarity and available_rarities:
@@ -906,7 +934,9 @@ def verify_card_match(
     ) or verification_result['confidence_score'] >= 60
     
     return verification_result
-    """Lookup card name from MongoDB cache using the card number."""
+
+
+def lookup_card_name_from_cache(card_number: str) -> Optional[str]:
     try:
         # Initialize sync MongoDB connection if needed
         if sync_price_scraping_client is None:
@@ -1093,7 +1123,7 @@ async def select_best_tcgplayer_variant(
                     if (!title) {
                         const allText = link.textContent?.trim() || '';
                         // Split by common separators and find the longest meaningful part
-                        const parts = allText.split(/\\n|Market Price:|listings from|#RA04-EN016|Quarter Century Stampede/);
+                        const parts = allText.split(/\\n|Market Price:|listings from|#/);
                         for (const part of parts) {
                             const cleanPart = part.trim();
                             if (cleanPart && cleanPart.length > 5 && /[a-zA-Z]/.test(cleanPart) && !cleanPart.includes('$')) {
@@ -1138,62 +1168,93 @@ async def select_best_tcgplayer_variant(
         for variant in variants:
             score = 0
             title_lower = variant['title'].lower()
+            url_lower = variant['href'].lower()
+            
+            # CRITICAL: Card number must appear in title or URL for a valid match
+            card_number_found = False
+            if card_number:
+                card_number_lower = card_number.lower()
+                if card_number_lower in title_lower or card_number_lower in url_lower:
+                    card_number_found = True
+                    score += 200  # Very high score for card number presence
+                    logger.info(f"✓ Card number {card_number} found in {variant['title'][:50]}...")
+                else:
+                    # Heavily penalize variants without the target card number
+                    score -= 100
+                    logger.warning(f"✗ Card number {card_number} NOT found in {variant['title'][:50]}...")
+                    
+            # CRITICAL: Card name verification - all words must match
+            card_name_perfect_match = False
+            if card_name:
+                name_words = card_name.lower().split()
+                # Check if ALL words of the card name appear in the title
+                name_match_count = sum(1 for word in name_words if word in title_lower)
+                if name_match_count == len(name_words):
+                    card_name_perfect_match = True
+                    score += 150  # Very high score for perfect card name match
+                    logger.info(f"✓ Perfect card name match for '{card_name}' in {variant['title'][:50]}...")
+                elif name_match_count > 0:
+                    score += (name_match_count / len(name_words)) * 50  # Reduced partial match score
+                    logger.info(f"⚠ Partial card name match ({name_match_count}/{len(name_words)}) for '{card_name}' in {variant['title'][:50]}...")
+                else:
+                    # Penalize variants that don't match the card name at all
+                    score -= 50
+                    logger.warning(f"✗ No card name match for '{card_name}' in {variant['title'][:50]}...")
+            
+            # Only consider variants that have both card number and card name matches
+            if not (card_number_found and card_name_perfect_match):
+                score -= 200  # Heavy penalty for missing critical matches
+                logger.warning(f"⚠ REJECTING variant (missing critical matches): {variant['title'][:50]}...")
             
             # Verify this variant against our expected card info from MongoDB cache
             verification_result = None
             if expected_card_info:
-                # Try to extract card name from title for verification
-                title_words = variant['title'].split()
-                # Take the first part as potential card name (before rarity/set info)
-                potential_card_name = ' '.join(title_words[:3])  # Take first 3 words as rough card name
+                # Extract a more comprehensive card name from title for verification
+                # Remove common suffixes to get cleaner card name for comparison
+                clean_title = variant['title']
+                for suffix in [' -', ' (', ' -', ' |']:
+                    if suffix in clean_title:
+                        clean_title = clean_title.split(suffix)[0]
                 
                 verification_result = verify_card_match(
-                    potential_card_name, 
+                    clean_title.strip(), 
                     '', # We don't extract rarity from title here
                     expected_card_info, 
                     card_rarity or ''
                 )
                 
-                # Boost score significantly for verified matches
+                # Boost score for verified matches
                 if verification_result['overall_match']:
-                    score += 120  # High boost for verified cards
-                    logger.info(f"✓ VERIFIED match for {variant['title'][:50]}... (confidence: {verification_result['confidence_score']})")
+                    score += 100  # Boost for verified cards
+                    logger.info(f"✓ Cache verification passed for {variant['title'][:50]}... (confidence: {verification_result['confidence_score']})")
                 else:
-                    logger.info(f"⚠ Unverified variant: {variant['title'][:50]}... (confidence: {verification_result['confidence_score']})")
-            
-            # High score for exact card number match
-            if card_number and card_number.lower() in title_lower:
-                score += 100
-                
-            # High score for card name match
-            if card_name:
-                name_words = card_name.lower().split()
-                # Check if all words of the card name appear in the title
-                name_match_count = sum(1 for word in name_words if word in title_lower)
-                if name_match_count == len(name_words):
-                    score += 80  # All words match
-                elif name_match_count > 0:
-                    score += (name_match_count / len(name_words)) * 60  # Partial match
+                    logger.info(f"⚠ Cache verification failed for {variant['title'][:50]}... (confidence: {verification_result['confidence_score']})")
                 
             # Score for rarity match
             if card_rarity:
                 rarity_variants = normalize_rarity_for_matching(card_rarity)
+                rarity_found = False
                 for rarity_variant in rarity_variants:
                     if rarity_variant.lower() in title_lower:
-                        score += 50
+                        score += 75  # Good score for rarity match
+                        rarity_found = True
+                        logger.info(f"✓ Rarity match for '{card_rarity}' in {variant['title'][:50]}...")
                         break
+                if not rarity_found:
+                    logger.info(f"⚠ No rarity match for '{card_rarity}' in {variant['title'][:50]}...")
             
             # Score for art variant match
             if target_art_version:
                 art_version = str(target_art_version).strip().lower()
                 if art_version in title_lower:
                     score += 25
+                    logger.info(f"✓ Art variant match for '{target_art_version}' in {variant['title'][:50]}...")
                     
-            # Prefer products with more detailed titles (likely to have correct variants)
-            score += min(len(variant['title']) // 10, 10)
+            # Small bonus for detailed titles (but not a major factor)
+            score += min(len(variant['title']) // 20, 5)
             
             scored_variants.append((score, variant))
-            logger.info(f"Variant: {variant['title'][:80]}... Score: {score}")
+            logger.info(f"Final Score: {score} | Variant: {variant['title'][:80]}...")
         
         # Sort by score and return the best match
         scored_variants.sort(reverse=True, key=lambda x: x[0])
@@ -1202,13 +1263,39 @@ async def select_best_tcgplayer_variant(
             best_variant = scored_variants[0][1]
             best_score = scored_variants[0][0]
             
-            # Log additional verification info for the selected variant
+            # CRITICAL VALIDATION: Do a final check that our selected variant actually matches our requirements
+            best_title_lower = best_variant['title'].lower()
+            best_url_lower = best_variant['href'].lower()
+            
+            # Verify card number is present
+            card_number_present = not card_number or (card_number.lower() in best_title_lower or card_number.lower() in best_url_lower)
+            
+            # Verify card name match if provided
+            card_name_match = True
+            if card_name:
+                name_words = card_name.lower().split()
+                card_name_match = all(word in best_title_lower for word in name_words)
+            
+            if not card_number_present:
+                logger.error(f"CRITICAL ERROR: Selected variant does not contain card number {card_number}")
+                logger.error(f"Selected: {best_variant['title']}")
+                logger.error(f"URL: {best_variant['href']}")
+                return None
+                
+            if not card_name_match:
+                logger.error(f"CRITICAL ERROR: Selected variant does not match card name '{card_name}'")
+                logger.error(f"Selected: {best_variant['title']}")
+                return None
+            
+            # Log final selection details
+            logger.info(f"="*80)
+            logger.info(f"FINAL SELECTION - Score: {best_score}")
+            logger.info(f"Title: {best_variant['title']}")
+            logger.info(f"URL: {best_variant['href']}")
             if expected_card_info:
-                logger.info(f"SELECTED: {best_variant['title']} (Score: {best_score})")
                 logger.info(f"Expected from cache: {expected_card_info['card_name']} | {expected_card_info.get('set_rarity', 'Unknown rarity')}")
                 logger.info(f"Available rarities in cache: {expected_card_info['available_rarities']}")
-            else:
-                logger.info(f"Selected best variant with score {best_score}: {best_variant['title']}")
+            logger.info(f"="*80)
             
             return best_variant['href']
         else:
