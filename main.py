@@ -242,6 +242,59 @@ def normalize_rarity(rarity: str) -> str:
     if 'platinum' in normalized and 'secret' in normalized:
         return 'platinum secret rare'
     
+    # Special handling for Prismatic variants
+    if 'prismatic' in normalized:
+        if 'secret' in normalized:
+            return 'prismatic secret rare'
+        elif 'collector' in normalized:
+            return "prismatic collector's rare"
+        elif 'ultimate' in normalized:
+            return 'prismatic ultimate rare'
+    
+    # Special handling for Starlight Rare
+    if 'starlight' in normalized:
+        return 'starlight rare'
+    
+    # Special handling for Collector's Rare
+    if 'collector' in normalized:
+        return "collector's rare"
+    
+    # Special handling for Ghost variants
+    if 'ghost' in normalized:
+        if 'gold' in normalized:
+            return 'ghost/gold rare'
+        return 'ghost rare'
+    
+    # Special handling for Parallel variants
+    if 'parallel' in normalized:
+        if 'ultra' in normalized:
+            return 'ultra parallel rare'
+        elif 'secret' in normalized:
+            return 'parallel secret rare'
+        return 'parallel rare'
+    
+    # Special handling for Gold variants
+    if 'gold' in normalized:
+        if 'premium' in normalized:
+            return 'premium gold rare'
+        return 'gold rare'
+    
+    # Special handling for other special rarities
+    if 'duel terminal' in normalized:
+        return 'duel terminal rare'
+    if 'mosaic' in normalized:
+        return 'mosaic rare'
+    if 'shatterfoil' in normalized:
+        return 'shatterfoil rare'
+    if 'starfoil' in normalized:
+        return 'starfoil rare'
+    if 'hobby league' in normalized:
+        return 'hobby league rare'
+    if 'millennium' in normalized:
+        return 'millennium rare'
+    if '20th' in normalized and 'secret' in normalized:
+        return '20th secret rare'
+    
     return normalized
 
 def normalize_rarity_for_matching(rarity: str) -> List[str]:
@@ -277,13 +330,167 @@ def normalize_rarity_for_matching(rarity: str) -> List[str]:
             'plat secret rare'
         ])
     
-    # Handle common abbreviations
+    # Handle Prismatic variants
+    if 'prismatic' in normalized:
+        if 'secret' in normalized:
+            variants.extend([
+                'prismatic secret rare',
+                'prismatic secret'
+            ])
+        elif 'collector' in normalized:
+            variants.extend([
+                'prismatic collector rare',
+                "prismatic collector's rare"
+            ])
+        elif 'ultimate' in normalized:
+            variants.extend([
+                'prismatic ultimate rare'
+            ])
+    
+    # Handle Starlight Rare
+    if 'starlight' in normalized:
+        variants.extend([
+            'starlight rare',
+            'starlight'
+        ])
+    
+    # Handle Collector's Rare
+    if 'collector' in normalized:
+        variants.extend([
+            "collector's rare",
+            'collector rare',
+            'collectors rare'
+        ])
+    
+    # Handle Ghost Rare
+    if 'ghost' in normalized:
+        if 'gold' in normalized:
+            variants.extend([
+                'ghost gold rare',
+                'ghost/gold rare'
+            ])
+        else:
+            variants.extend([
+                'ghost rare',
+                'ghost'
+            ])
+    
+    # Handle Ultimate Rare
+    if 'ultimate' in normalized:
+        variants.extend([
+            'ultimate rare',
+            'ultimate'
+        ])
+    
+    # Handle Parallel variants
+    if 'parallel' in normalized:
+        if 'ultra' in normalized:
+            variants.extend([
+                'ultra parallel rare',
+                'parallel ultra rare'
+            ])
+        elif 'secret' in normalized:
+            variants.extend([
+                'parallel secret rare'
+            ])
+        else:
+            variants.extend([
+                'parallel rare',
+                'parallel'
+            ])
+    
+    # Handle Gold variants
+    if 'gold' in normalized:
+        if 'premium' in normalized:
+            variants.extend([
+                'premium gold rare'
+            ])
+        else:
+            variants.extend([
+                'gold rare',
+                'gold'
+            ])
+    
+    # Handle Duel Terminal Rare
+    if 'duel terminal' in normalized:
+        variants.extend([
+            'duel terminal rare',
+            'dt rare'
+        ])
+    
+    # Handle Mosaic Rare
+    if 'mosaic' in normalized:
+        variants.extend([
+            'mosaic rare'
+        ])
+    
+    # Handle Shatterfoil Rare
+    if 'shatterfoil' in normalized:
+        variants.extend([
+            'shatterfoil rare'
+        ])
+    
+    # Handle Starfoil Rare
+    if 'starfoil' in normalized:
+        variants.extend([
+            'starfoil rare'
+        ])
+    
+    # Handle Hobby League Rare
+    if 'hobby league' in normalized:
+        variants.extend([
+            'hobby league rare',
+            'hl rare'
+        ])
+    
+    # Handle Millennium Rare
+    if 'millennium' in normalized:
+        variants.extend([
+            'millennium rare'
+        ])
+    
+    # Handle 25th Anniversary variants
+    if '25th anniversary' in normalized:
+        if 'ultra' in normalized:
+            variants.extend([
+                '25th anniversary ultra rare',
+                'quarter century ultra rare'
+            ])
+        elif 'secret' in normalized:
+            variants.extend([
+                '25th anniversary secret rare',
+                'quarter century secret rare'
+            ])
+    
+    # Handle 20th Secret Rare
+    if '20th' in normalized and 'secret' in normalized:
+        variants.extend([
+            '20th secret rare'
+        ])
+    
+    # Handle Extra Secret Rare (OCG)
+    if 'extra secret' in normalized:
+        variants.extend([
+            'extra secret rare'
+        ])
+    
+    # Handle Red/Blue Secret Rare (OCG)
+    if ('red' in normalized or 'blue' in normalized) and 'secret' in normalized:
+        variants.extend([
+            'red secret rare' if 'red' in normalized else 'blue secret rare'
+        ])
+    
+    # Handle common abbreviations for standard rarities
     if 'secret rare' in normalized:
-        variants.append('secret')
+        variants.extend(['secret', 'sr'])
     if 'ultra rare' in normalized:
-        variants.append('ultra')
+        variants.extend(['ultra', 'ur'])
     if 'super rare' in normalized:
-        variants.append('super')
+        variants.extend(['super', 'sr'])
+    if normalized == 'rare':
+        variants.extend(['r'])
+    if normalized == 'common':
+        variants.extend(['c'])
     
     return list(set(variants))  # Remove duplicates
 
@@ -539,6 +746,79 @@ def save_price_data_sync(price_data: Dict) -> bool:
         logger.error(f"Error saving sync price data: {e}")
         return False
 
+def lookup_card_name_from_cache(card_number: str) -> Optional[str]:
+    """Lookup card name from MongoDB cache using the card number."""
+    try:
+        # Initialize sync MongoDB connection if needed
+        if sync_price_scraping_client is None:
+            initialize_sync_price_scraping()
+        
+        # Get the card variants collection
+        db = sync_price_scraping_client.get_default_database()
+        variants_collection = db[MONGODB_CARD_VARIANTS_COLLECTION]
+        
+        # Search for the card in the variants collection by card number
+        query = {"card_sets.set_rarity_code": {"$regex": f"^{re.escape(card_number)}", "$options": "i"}}
+        
+        card_document = variants_collection.find_one(query)
+        
+        if card_document:
+            card_name = card_document.get('name')
+            if card_name:
+                logger.info(f"Found card name '{card_name}' for card number {card_number} in cache")
+                return card_name.strip()
+        
+        logger.warning(f"Card {card_number} not found in MongoDB cache")
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error looking up card name from cache for {card_number}: {e}")
+        return None
+
+def lookup_card_name_from_ygo_api(card_number: str) -> Optional[str]:
+    """Lookup card name from YGO API using the card number."""
+    try:
+        # Try to search by card number first
+        api_url = f"{YGO_API_BASE_URL}/cardinfo.php?misc=yes&num={quote(card_number)}"
+        response = requests.get(api_url, timeout=10)
+        
+        if response.status_code == 200:
+            cards_data = response.json()
+            cards_list = cards_data.get('data', [])
+            
+            # Look for exact card number match in card sets
+            for card in cards_list:
+                card_sets = card.get('card_sets', [])
+                for card_set in card_sets:
+                    set_rarity_code = card_set.get('set_rarity_code', '')
+                    if set_rarity_code.upper() == card_number.upper():
+                        card_name = card.get('name')
+                        if card_name:
+                            logger.info(f"Found card name '{card_name}' for card number {card_number} via YGO API")
+                            return card_name.strip()
+        
+        logger.warning(f"Card {card_number} not found in YGO API")
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error looking up card name from YGO API for {card_number}: {e}")
+        return None
+
+def lookup_card_name(card_number: str) -> Optional[str]:
+    """Lookup card name using MongoDB cache first, then YGO API as fallback."""
+    # Try cache first
+    card_name = lookup_card_name_from_cache(card_number)
+    if card_name:
+        return card_name
+    
+    # Fallback to YGO API
+    card_name = lookup_card_name_from_ygo_api(card_number)
+    if card_name:
+        return card_name
+    
+    logger.warning(f"Could not find card name for {card_number} in cache or YGO API")
+    return None
+
 def extract_set_code(card_number: str) -> Optional[str]:
     """Extract set code from card number."""
     if not card_number:
@@ -692,7 +972,7 @@ async def select_best_tcgplayer_variant(
             
         logger.info(f"Found {len(variants)} variants to check")
         
-        # Score variants based on card number, rarity, and art variant matches
+        # Score variants based on card number, rarity, card name, and art variant matches
         scored_variants = []
         
         for variant in variants:
@@ -702,6 +982,16 @@ async def select_best_tcgplayer_variant(
             # High score for exact card number match
             if card_number.lower() in title_lower:
                 score += 100
+                
+            # High score for card name match
+            if card_name:
+                name_words = card_name.lower().split()
+                # Check if all words of the card name appear in the title
+                name_match_count = sum(1 for word in name_words if word in title_lower)
+                if name_match_count == len(name_words):
+                    score += 80  # All words match
+                elif name_match_count > 0:
+                    score += (name_match_count / len(name_words)) * 60  # Partial match
                 
             # Score for rarity match
             if card_rarity:
@@ -1192,17 +1482,13 @@ async def scrape_price_from_tcgplayer(
             if card_name:
                 search_attempts.append((card_name.strip(), "card name"))
             
-            # If no card name, try extracting it from common card mappings or patterns
+            # If no card name, try looking it up from cache/API
             if not card_name and card_number:
-                # Common Yu-Gi-Oh card mappings for known problematic card numbers
-                card_mappings = {
-                    "RA04-EN016": "Black Metal Dragon",
-                    # Add more mappings as needed based on user reports
-                }
-                
-                mapped_name = card_mappings.get(card_number.upper())
-                if mapped_name:
-                    search_attempts.append((mapped_name, "known card name mapping"))
+                looked_up_name = lookup_card_name(card_number)
+                if looked_up_name:
+                    search_attempts.append((looked_up_name, "looked up card name"))
+                    # Update card_name for later use in verification
+                    card_name = looked_up_name
             
             successful_search = False
             search_url = None
@@ -1256,7 +1542,7 @@ async def scrape_price_from_tcgplayer(
             final_url = page.url
             
             # Extract clean card name from TCGPlayer page
-            page_title = await page.evaluate("""
+            page_title = await page.evaluate(r"""
                 () => {
                     // Try to get the product name from various TCGPlayer selectors
                     const selectors = [
