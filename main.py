@@ -665,9 +665,9 @@ def validate_card_rarity_sync(card_number: str, card_rarity: str) -> bool:
         db = sync_price_scraping_client.get_default_database()
         variants_collection = db[MONGODB_CARD_VARIANTS_COLLECTION]
         
-        # Search for the card in the variants collection
-        query = {"card_sets.set_rarity_code": {"$regex": f"^{re.escape(card_number)}", "$options": "i"}}
-        
+        # Search for all variants with the same card_id/card_name as this card number
+        # First find the card with this set_code to get its card_name
+        query = {"set_code": card_number}
         card_document = variants_collection.find_one(query)
         
         if not card_document:
@@ -675,12 +675,19 @@ def validate_card_rarity_sync(card_number: str, card_rarity: str) -> bool:
             # If card is not found in our database, allow the rarity (fallback)
             return True
         
-        # Extract available rarities from the card document
-        available_rarities = set()
-        card_sets = card_document.get('card_sets', [])
+        # Get the card name to find all variants of this card
+        card_name = card_document.get('card_name')
+        if not card_name:
+            return True
         
-        for card_set in card_sets:
-            rarity = card_set.get('rarity')
+        # Find all variants of this card to get available rarities
+        variants_query = {"card_name": card_name}
+        all_variants = variants_collection.find(variants_query)
+        
+        # Extract available rarities from all variants
+        available_rarities = set()
+        for variant in all_variants:
+            rarity = variant.get('set_rarity')
             if rarity:
                 available_rarities.add(rarity.lower().strip())
         
@@ -786,7 +793,119 @@ def save_price_data_sync(price_data: Dict) -> bool:
         logger.error(f"Error saving sync price data: {e}")
         return False
 
+def lookup_card_info_from_cache(card_number: str) -> Optional[Dict]:
+    """Lookup comprehensive card information from MongoDB cache using the card number."""
+    try:
+        # Initialize sync MongoDB connection if needed
+        if sync_price_scraping_client is None:
+            initialize_sync_price_scraping()
+        
+        # Get the card variants collection
+        db = sync_price_scraping_client.get_default_database()
+        variants_collection = db[MONGODB_CARD_VARIANTS_COLLECTION]
+        
+        # Search for the card in the variants collection by set_code (card number)
+        query = {"set_code": card_number}
+        
+        card_document = variants_collection.find_one(query)
+        
+        if card_document:
+            # Get card name and other info
+            card_name = card_document.get('card_name', '')
+            set_name = card_document.get('set_name', '')
+            set_rarity = card_document.get('set_rarity', '')
+            card_id = card_document.get('card_id')
+            
+            # Find all variants of this card to get available rarities
+            if card_name:
+                variants_query = {"card_name": card_name}
+                all_variants = list(variants_collection.find(variants_query))
+                
+                available_rarities = []
+                available_sets = []
+                for variant in all_variants:
+                    if variant.get('set_rarity'):
+                        available_rarities.append(variant.get('set_rarity'))
+                    if variant.get('set_name'):
+                        available_sets.append(variant.get('set_name'))
+                
+                card_info = {
+                    'card_name': card_name,
+                    'set_name': set_name,
+                    'set_rarity': set_rarity,
+                    'set_code': card_number,
+                    'card_id': card_id,
+                    'available_rarities': list(set(available_rarities)),
+                    'available_sets': list(set(available_sets))
+                }
+                
+                logger.info(f"Found card info for {card_number}: {card_name}, rarities: {available_rarities}")
+                return card_info
+        
+        logger.warning(f"Card {card_number} not found in MongoDB cache")
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error looking up card info from cache for {card_number}: {e}")
+        return None
+
 def lookup_card_name_from_cache(card_number: str) -> Optional[str]:
+    """Lookup card name from MongoDB cache using the card number."""
+    card_info = lookup_card_info_from_cache(card_number)
+    return card_info.get('card_name') if card_info else None
+
+def verify_card_match(
+    tcg_card_name: str, 
+    tcg_card_rarity: str, 
+    expected_card_info: Optional[Dict], 
+    target_rarity: str
+) -> Dict[str, any]:
+    """Verify if TCGPlayer card matches our expected card info from cache."""
+    verification_result = {
+        'name_match': False,
+        'rarity_match': False,
+        'overall_match': False,
+        'confidence_score': 0
+    }
+    
+    if not expected_card_info:
+        # If no cache info, we can't verify but allow it
+        verification_result['overall_match'] = True
+        verification_result['confidence_score'] = 50  # Medium confidence
+        return verification_result
+    
+    expected_name = expected_card_info.get('card_name', '')
+    available_rarities = expected_card_info.get('available_rarities', [])
+    
+    # Check name match
+    if expected_name and tcg_card_name:
+        expected_words = set(expected_name.lower().split())
+        tcg_words = set(tcg_card_name.lower().split())
+        
+        # Calculate name similarity
+        common_words = expected_words.intersection(tcg_words)
+        if common_words:
+            name_similarity = len(common_words) / max(len(expected_words), len(tcg_words))
+            if name_similarity >= 0.7:  # 70% word overlap
+                verification_result['name_match'] = True
+                verification_result['confidence_score'] += 40
+    
+    # Check rarity match
+    if target_rarity and available_rarities:
+        target_normalized = normalize_rarity(target_rarity)
+        for available_rarity in available_rarities:
+            available_normalized = normalize_rarity(available_rarity)
+            if target_normalized == available_normalized:
+                verification_result['rarity_match'] = True
+                verification_result['confidence_score'] += 40
+                break
+    
+    # Overall match if both name and rarity match or if we have good confidence
+    verification_result['overall_match'] = (
+        verification_result['name_match'] and verification_result['rarity_match']
+    ) or verification_result['confidence_score'] >= 60
+    
+    return verification_result
     """Lookup card name from MongoDB cache using the card number."""
     try:
         # Initialize sync MongoDB connection if needed
@@ -797,13 +916,13 @@ def lookup_card_name_from_cache(card_number: str) -> Optional[str]:
         db = sync_price_scraping_client.get_default_database()
         variants_collection = db[MONGODB_CARD_VARIANTS_COLLECTION]
         
-        # Search for the card in the variants collection by card number
-        query = {"card_sets.set_rarity_code": {"$regex": f"^{re.escape(card_number)}", "$options": "i"}}
+        # Search for the card in the variants collection by set_code (card number)
+        query = {"set_code": card_number}
         
         card_document = variants_collection.find_one(query)
         
         if card_document:
-            card_name = card_document.get('name')
+            card_name = card_document.get('card_name')
             if card_name:
                 logger.info(f"Found card name '{card_name}' for card number {card_number} in cache")
                 return card_name.strip()
@@ -925,7 +1044,8 @@ async def select_best_tcgplayer_variant(
     card_number: str, 
     card_name: Optional[str], 
     card_rarity: Optional[str], 
-    target_art_version: Optional[str]
+    target_art_version: Optional[str],
+    expected_card_info: Optional[Dict] = None
 ) -> Optional[str]:
     """Select best card variant from TCGPlayer search results."""
     try:
@@ -1019,8 +1139,30 @@ async def select_best_tcgplayer_variant(
             score = 0
             title_lower = variant['title'].lower()
             
+            # Verify this variant against our expected card info from MongoDB cache
+            verification_result = None
+            if expected_card_info:
+                # Try to extract card name from title for verification
+                title_words = variant['title'].split()
+                # Take the first part as potential card name (before rarity/set info)
+                potential_card_name = ' '.join(title_words[:3])  # Take first 3 words as rough card name
+                
+                verification_result = verify_card_match(
+                    potential_card_name, 
+                    '', # We don't extract rarity from title here
+                    expected_card_info, 
+                    card_rarity or ''
+                )
+                
+                # Boost score significantly for verified matches
+                if verification_result['overall_match']:
+                    score += 120  # High boost for verified cards
+                    logger.info(f"✓ VERIFIED match for {variant['title'][:50]}... (confidence: {verification_result['confidence_score']})")
+                else:
+                    logger.info(f"⚠ Unverified variant: {variant['title'][:50]}... (confidence: {verification_result['confidence_score']})")
+            
             # High score for exact card number match
-            if card_number.lower() in title_lower:
+            if card_number and card_number.lower() in title_lower:
                 score += 100
                 
             # High score for card name match
@@ -1058,7 +1200,16 @@ async def select_best_tcgplayer_variant(
         
         if scored_variants and scored_variants[0][0] > 0:
             best_variant = scored_variants[0][1]
-            logger.info(f"Selected best variant with score {scored_variants[0][0]}: {best_variant['title']}")
+            best_score = scored_variants[0][0]
+            
+            # Log additional verification info for the selected variant
+            if expected_card_info:
+                logger.info(f"SELECTED: {best_variant['title']} (Score: {best_score})")
+                logger.info(f"Expected from cache: {expected_card_info['card_name']} | {expected_card_info.get('set_rarity', 'Unknown rarity')}")
+                logger.info(f"Available rarities in cache: {expected_card_info['available_rarities']}")
+            else:
+                logger.info(f"Selected best variant with score {best_score}: {best_variant['title']}")
+            
             return best_variant['href']
         else:
             logger.warning("No suitable variant found based on scoring")
@@ -1511,6 +1662,13 @@ async def scrape_price_from_tcgplayer(
             )
             page = await context.new_page()
             
+            # Get comprehensive card info from cache if card_number is provided
+            expected_card_info = None
+            if card_number:
+                expected_card_info = lookup_card_info_from_cache(card_number)
+                if expected_card_info:
+                    logger.info(f"Found card info in cache: {expected_card_info['card_name']} with rarities: {expected_card_info['available_rarities']}")
+            
             # ALWAYS search TCGPlayer by card name, NEVER by card number
             search_attempts = []
             
@@ -1572,7 +1730,7 @@ async def scrape_price_from_tcgplayer(
             if not is_product_page:
                 # We're on search results, select best variant
                 best_variant_url = await select_best_tcgplayer_variant(
-                    page, card_number, card_name, card_rarity, art_variant
+                    page, card_number, card_name, card_rarity, art_variant, expected_card_info
                 )
                 
                 if best_variant_url:
