@@ -520,7 +520,7 @@ def normalize_rarity_for_matching(rarity: str) -> List[str]:
     return list(set(variants))  # Remove duplicates
 
 def find_cached_price_data_sync(
-    card_number: str, 
+    card_number: Optional[str] = None, 
     card_name: Optional[str] = None,
     card_rarity: Optional[str] = None,
     art_variant: Optional[str] = None
@@ -529,8 +529,12 @@ def find_cached_price_data_sync(
     if sync_price_scraping_collection is None:
         return False, None
     
+    # Need at least card_number or card_name for cache lookup
+    if not card_number and not card_name:
+        return False, None
+    
     try:
-        logger.info(f"🔍 CACHE LOOKUP: card_number={card_number}, rarity={card_rarity}, art_variant={art_variant}")
+        logger.info(f"🔍 CACHE LOOKUP: card_number={card_number}, card_name={card_name}, rarity={card_rarity}, art_variant={art_variant}")
         
         # Define projection to exclude _id field
         projection = {
@@ -555,19 +559,26 @@ def find_cached_price_data_sync(
             "error_message": 1
         }
         
+        # Build base query - use card_number if available, otherwise card_name
+        base_query = {}
+        if card_number:
+            base_query["card_number"] = card_number
+        elif card_name:
+            base_query["card_name"] = {"$regex": re.escape(card_name), "$options": "i"}
+            
+        # Add rarity filter if provided
+        if card_rarity:
+            base_query["card_rarity"] = {"$regex": re.escape(card_rarity), "$options": "i"}
+        
         # Build query based on art variant
         if art_variant and art_variant.strip():
             normalized_art = re.sub(r'(st|nd|rd|th)$', '', art_variant.lower().strip())
             query = {
-                "card_number": card_number,
-                "card_rarity": {"$regex": re.escape(card_rarity), "$options": "i"},
+                **base_query,
                 "card_art_variant": {"$regex": f"^{re.escape(normalized_art)}(st|nd|rd|th)?$", "$options": "i"}
             }
         else:
-            query = {
-                "card_number": card_number,
-                "card_rarity": {"$regex": re.escape(card_rarity), "$options": "i"}
-            }
+            query = base_query
         
         # Find documents with projection and sort
         documents = list(sync_price_scraping_collection.find(
@@ -705,9 +716,9 @@ def save_price_data_sync(price_data: Dict) -> bool:
         return False
     
     try:
-        # Validate required fields
-        if not price_data.get("card_number"):
-            logger.error("Cannot save price data: card_number is required")
+        # Validate required fields - need either card_number or card_name
+        if not price_data.get("card_number") and not price_data.get("card_name"):
+            logger.error("Cannot save price data: either card_number or card_name is required")
             return False
         
         if not price_data.get("card_rarity"):
@@ -717,8 +728,12 @@ def save_price_data_sync(price_data: Dict) -> bool:
         # Update timestamp
         price_data['last_price_updt'] = datetime.now(UTC)
         
-        # Build query for upsert - handle empty strings properly
-        query = {"card_number": price_data["card_number"]}
+        # Build query for upsert - prioritize card_number if available
+        query = {}
+        if price_data.get("card_number") and price_data["card_number"] != "Unknown":
+            query["card_number"] = price_data["card_number"]
+        elif price_data.get("card_name"):
+            query["card_name"] = price_data["card_name"]
         
         # Only add non-empty fields to the query
         card_name = price_data.get("card_name")
@@ -1476,7 +1491,7 @@ async def extract_prices_from_dom(page) -> Dict[str, Any]:
         return {}
 
 async def scrape_price_from_tcgplayer(
-    card_number: str,
+    card_number: Optional[str] = None,
     card_name: Optional[str] = None,
     card_rarity: Optional[str] = None,
     art_variant: Optional[str] = None
@@ -1496,24 +1511,29 @@ async def scrape_price_from_tcgplayer(
             )
             page = await context.new_page()
             
-            # First try searching by card number, then by card name if that fails
+            # ALWAYS search TCGPlayer by card name, NEVER by card number
             search_attempts = []
             
-            # Add card number search
-            if card_number:
-                search_attempts.append((card_number.strip(), "card number"))
-            
-            # Add card name search as fallback
+            # If card name is provided, use it directly
             if card_name:
-                search_attempts.append((card_name.strip(), "card name"))
-            
+                search_attempts.append((card_name.strip(), "provided card name"))
             # If no card name, try looking it up from cache/API
-            if not card_name and card_number:
+            elif card_number:
                 looked_up_name = lookup_card_name(card_number)
                 if looked_up_name:
                     search_attempts.append((looked_up_name, "looked up card name"))
                     # Update card_name for later use in verification
                     card_name = looked_up_name
+                else:
+                    # Cannot proceed without card name - TCGPlayer requires card names
+                    logger.error(f"Cannot search TCGPlayer without card name. Card number {card_number} not found in cache or YGO API")
+                    await browser.close()
+                    return None
+            else:
+                # No card_number and no card_name - should not happen due to API validation
+                logger.error("Cannot search TCGPlayer without either card_number or card_name")
+                await browser.close()
+                return None
             
             successful_search = False
             search_url = None
@@ -1542,7 +1562,7 @@ async def scrape_price_from_tcgplayer(
                     logger.warning(f"No results found for {search_type}: {search_query}")
             
             if not successful_search:
-                logger.error(f"No search query returned results for card {card_number}")
+                logger.error(f"No search query returned results for card {card_number or card_name}")
                 await browser.close()
                 return None
             
@@ -1559,7 +1579,7 @@ async def scrape_price_from_tcgplayer(
                     logger.info(f"Selected best variant: {best_variant_url}")
                     await page.goto(best_variant_url, wait_until='networkidle', timeout=60000)
                 else:
-                    logger.warning(f"No suitable variant found for {card_number}")
+                    logger.warning(f"No suitable variant found for {card_number or card_name}")
                     await browser.close()
                     return None
             
@@ -1648,14 +1668,14 @@ async def scrape_price_from_tcgplayer(
             price_data = await extract_prices_from_tcgplayer_dom(page)
             
             # Extract set code and booster set name
-            set_code = extract_set_code(card_number)
+            set_code = extract_set_code(card_number) if card_number else None
             booster_set_name = extract_booster_set_name(final_url)
             
             await browser.close()
             
             # Create price record with clean data matching expected output format
             price_record = {
-                "card_number": card_number,
+                "card_number": card_number or "Unknown",
                 "card_name": page_title,  # Use cleaned page title
                 "card_art_variant": final_art_variant,  # Use actual art variant found
                 "card_rarity": final_rarity,  # Use detected or requested rarity
@@ -1671,9 +1691,9 @@ async def scrape_price_from_tcgplayer(
             return price_record
             
     except Exception as e:
-        logger.error(f"Error scraping prices for {card_number}: {e}")
+        logger.error(f"Error scraping prices for {card_number or card_name}: {e}")
         return {
-            "card_number": card_number,
+            "card_number": card_number or "Unknown",
             "card_name": card_name or '',
             "card_art_variant": art_variant,
             "card_rarity": card_rarity,
@@ -1695,14 +1715,17 @@ def scrape_card_price():
                 "error": "Request body must be JSON"
             }), 400
         
-        card_number = data.get('card_number')
-        if not card_number or not card_number.strip():
+        card_number = data.get('card_number', '').strip() if data.get('card_number') else None
+        card_name = data.get('card_name', '').strip() if data.get('card_name') else None
+        
+        # Since TCGPlayer requires card names, we need either:
+        # 1. card_number that can be looked up to get card_name, OR
+        # 2. card_name provided directly
+        if not card_number and not card_name:
             return jsonify({
                 "success": False,
-                "error": "card_number is required and cannot be empty"
+                "error": "Either card_number or card_name is required"
             }), 400
-        
-        card_name = data.get('card_name', '').strip() if data.get('card_name') else None
         card_rarity = data.get('card_rarity', '').strip() if data.get('card_rarity') else None
         art_variant = data.get('art_variant', '').strip() if data.get('art_variant') else None
         
@@ -1716,20 +1739,23 @@ def scrape_card_price():
                 "error": "card_rarity is required and cannot be empty"
             }), 400
         
-        logger.info(f"Price request for card: {card_number}, name: {card_name}, rarity: {card_rarity}, art: {art_variant}, force_refresh: {force_refresh}")
+        logger.info(f"Price request for card: {card_number or 'None'}, name: {card_name or 'None'}, rarity: {card_rarity}, art: {art_variant}, force_refresh: {force_refresh}")
         
         # Initialize synchronous connections
         initialize_sync_price_scraping()
         
-        # Validate card rarity using synchronous function
-        logger.info(f"Validating rarity '{card_rarity}' for card {card_number}")
-        is_valid_rarity = validate_card_rarity_sync(card_number, card_rarity)
-        
-        if not is_valid_rarity:
-            return jsonify({
-                "success": False,
-                "error": f"Invalid rarity '{card_rarity}' for card {card_number}. Please check the card variant database for available rarities."
-            }), 400
+        # Validate card rarity using synchronous function (only if card_number is provided)
+        if card_number:
+            logger.info(f"Validating rarity '{card_rarity}' for card {card_number}")
+            is_valid_rarity = validate_card_rarity_sync(card_number, card_rarity)
+            
+            if not is_valid_rarity:
+                return jsonify({
+                    "success": False,
+                    "error": f"Invalid rarity '{card_rarity}' for card {card_number}. Please check the card variant database for available rarities."
+                }), 400
+        else:
+            logger.info(f"Skipping rarity validation - no card_number provided (using card_name: {card_name})")
         
         # Check cache first unless force refresh is requested
         if not force_refresh:
