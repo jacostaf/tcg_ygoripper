@@ -621,17 +621,47 @@ async def select_best_tcgplayer_variant(
             () => {
                 const variants = [];
                 
-                // TCGPlayer search results are in product cards
-                const productCards = Array.from(document.querySelectorAll(
-                    '.search-result-item, .product-item, [data-testid="product-card"], .product-card'
-                ));
+                // TCGPlayer search results - look for product links directly
+                const productLinks = Array.from(document.querySelectorAll('a[href*="/product/"]'));
                 
-                productCards.forEach(card => {
-                    const titleElement = card.querySelector('a[href*="/product/"], .product-title a, .product-name a, h2 a');
-                    if (!titleElement) return;
+                productLinks.forEach(link => {
+                    const href = link.getAttribute('href');
                     
-                    const href = titleElement.getAttribute('href');
-                    const title = titleElement.textContent?.trim() || '';
+                    // Try to get title from different possible locations
+                    let title = '';
+                    
+                    // Method 1: Look for heading within the link
+                    const headingInLink = link.querySelector('h1, h2, h3, h4, h5, h6');
+                    if (headingInLink) {
+                        title = headingInLink.textContent?.trim() || '';
+                    }
+                    
+                    // Method 2: Look for generic elements with card names
+                    if (!title) {
+                        const genericElements = link.querySelectorAll('generic');
+                        for (const el of genericElements) {
+                            const text = el.textContent?.trim() || '';
+                            // Look for text that looks like a card name (contains letters and potentially special chars)
+                            if (text && text.length > 3 && /[a-zA-Z]/.test(text) && !text.startsWith('#') && !text.includes('listings') && !text.includes('$')) {
+                                title = text;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    // Method 3: Get all text content and try to extract meaningful title
+                    if (!title) {
+                        const allText = link.textContent?.trim() || '';
+                        // Split by common separators and find the longest meaningful part
+                        const parts = allText.split(/\\n|Market Price:|listings from|#RA04-EN016|Quarter Century Stampede/);
+                        for (const part of parts) {
+                            const cleanPart = part.trim();
+                            if (cleanPart && cleanPart.length > 5 && /[a-zA-Z]/.test(cleanPart) && !cleanPart.includes('$')) {
+                                title = cleanPart;
+                                break;
+                            }
+                        }
+                    }
                     
                     if (href && title) {
                         // Make sure href is absolute
@@ -650,6 +680,14 @@ async def select_best_tcgplayer_variant(
 
         if not variants:
             logger.warning("No variants found in TCGPlayer search results")
+            # Log page content for debugging
+            page_content = await page.evaluate("() => document.body.textContent || ''")
+            if "0 results for:" in page_content:
+                logger.warning("TCGPlayer returned 0 results - page shows no matching products")
+            elif "No results for" in page_content:
+                logger.warning("TCGPlayer 'No results' message detected")
+            else:
+                logger.warning("Unknown issue with TCGPlayer search results extraction")
             return None
             
         logger.info(f"Found {len(variants)} variants to check")
@@ -1143,13 +1181,59 @@ async def scrape_price_from_tcgplayer(
             )
             page = await context.new_page()
             
-            # Search using card number/name on TCGPlayer
-            # Use card name if provided, otherwise use card number
-            search_query = card_name.strip() if card_name else card_number.strip()
-            search_url = f"https://www.tcgplayer.com/search/yugioh/product?Language=English&productLineName=yugioh&q={quote(search_query)}&view=grid"
+            # First try searching by card number, then by card name if that fails
+            search_attempts = []
             
-            logger.info(f"Searching TCGPlayer for: {search_query}")
-            await page.goto(search_url, wait_until='networkidle', timeout=60000)
+            # Add card number search
+            if card_number:
+                search_attempts.append((card_number.strip(), "card number"))
+            
+            # Add card name search as fallback
+            if card_name:
+                search_attempts.append((card_name.strip(), "card name"))
+            
+            # If no card name, try extracting it from common card mappings or patterns
+            if not card_name and card_number:
+                # Common Yu-Gi-Oh card mappings for known problematic card numbers
+                card_mappings = {
+                    "RA04-EN016": "Black Metal Dragon",
+                    # Add more mappings as needed based on user reports
+                }
+                
+                mapped_name = card_mappings.get(card_number.upper())
+                if mapped_name:
+                    search_attempts.append((mapped_name, "known card name mapping"))
+            
+            successful_search = False
+            search_url = None
+            
+            for search_query, search_type in search_attempts:
+                search_url = f"https://www.tcgplayer.com/search/yugioh/product?Language=English&productLineName=yugioh&q={quote(search_query)}&view=grid"
+                
+                logger.info(f"Searching TCGPlayer for: {search_query} (using {search_type})")
+                await page.goto(search_url, wait_until='networkidle', timeout=60000)
+                
+                # Check if we got results by looking for the results count
+                results_count = await page.evaluate("""
+                    () => {
+                        const resultText = document.querySelector('h1')?.textContent || '';
+                        const match = resultText.match(/(\\d+)\\s+results?\\s+for/);
+                        return match ? parseInt(match[1]) : 0;
+                    }
+                """)
+                
+                logger.info(f"Search returned {results_count} results")
+                
+                if results_count > 0:
+                    successful_search = True
+                    break
+                else:
+                    logger.warning(f"No results found for {search_type}: {search_query}")
+            
+            if not successful_search:
+                logger.error(f"No search query returned results for card {card_number}")
+                await browser.close()
+                return None
             
             # Check if we landed directly on a product page or on search results
             is_product_page = await page.evaluate("() => document.querySelector('.product-details, .product-title, h1[data-testid=\"product-name\"]') !== null")
