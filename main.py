@@ -816,28 +816,34 @@ def save_price_data_sync(price_data: Dict) -> bool:
         # Update timestamp
         price_data['last_price_updt'] = datetime.now(UTC)
         
-        # Build query that matches the cache lookup logic exactly
-        query = {}
+        # Build lookup query that matches the cache lookup logic exactly (using regex for rarity)
+        lookup_query = {}
         
         # Use card_number as primary identifier if available
         if price_data.get("card_number") and price_data["card_number"] != "Unknown":
-            query["card_number"] = price_data["card_number"]
+            lookup_query["card_number"] = price_data["card_number"]
         elif price_data.get("card_name"):
-            # For card_name, we need to consider that cache lookup uses regex
-            # but for save we want exact match to avoid duplicates
-            query["card_name"] = price_data["card_name"].strip()
+            lookup_query["card_name"] = {"$regex": re.escape(price_data["card_name"]), "$options": "i"}
         
-        # Add rarity to query (using exact match for save, consistent with lookup intent)
+        # Add rarity to lookup query using regex (same as cache lookup)
         card_rarity = price_data.get("card_rarity")
         if card_rarity and card_rarity.strip():
-            query["card_rarity"] = card_rarity.strip()
+            lookup_query["card_rarity"] = {"$regex": re.escape(card_rarity.strip()), "$options": "i"}
         
-        # Add art variant to query if provided
+        # Add art variant to lookup query if provided (using exact match for art variant)
         card_art_variant = price_data.get("card_art_variant")
         if card_art_variant and card_art_variant.strip():
-            query["card_art_variant"] = card_art_variant.strip()
+            lookup_query["card_art_variant"] = card_art_variant.strip()
         
-        logger.info(f"Saving price data with query: {query}")
+        logger.info(f"Deleting existing records with lookup query: {lookup_query}")
+        
+        # Delete all existing records that match the lookup criteria
+        # This prevents accumulation of stale records and ensures cache consistency
+        delete_result = sync_price_scraping_collection.delete_many(lookup_query)
+        if delete_result.deleted_count > 0:
+            logger.info(f"Deleted {delete_result.deleted_count} existing records before saving new data")
+        else:
+            logger.info("No existing records found to delete")
         
         # Clean the price_data before saving - remove empty strings
         cleaned_data = {}
@@ -855,21 +861,14 @@ def save_price_data_sync(price_data: Dict) -> bool:
             logger.error("card_rarity missing from cleaned data")
             return False
         
-        # Use replace_one to ensure we replace existing records completely
-        result = sync_price_scraping_collection.replace_one(
-            query,
-            cleaned_data,
-            upsert=True
-        )
+        # Insert the new record (we deleted matching ones above, so this will always be an insert)
+        result = sync_price_scraping_collection.insert_one(cleaned_data)
         
-        if result.upserted_id:
-            logger.info(f"Created new sync price record with ID: {result.upserted_id}")
-            return True
-        elif result.modified_count > 0:
-            logger.info(f"Updated existing sync price record, modified {result.modified_count} document(s)")
+        if result.inserted_id:
+            logger.info(f"Created new sync price record with ID: {result.inserted_id}")
             return True
         else:
-            logger.warning("No sync documents were created or modified")
+            logger.warning("Failed to insert new sync price record")
             return False
         
     except Exception as e:
