@@ -768,7 +768,7 @@ def validate_card_rarity_sync(card_number: str, card_rarity: str) -> bool:
         logger.error(f"Error validating card rarity: {e}")
         return True
 
-def save_price_data_sync(price_data: Dict) -> bool:
+def save_price_data_sync(price_data: Dict, requested_art_variant: Optional[str] = None) -> bool:
     """Save price data to MongoDB using synchronous client."""
     if sync_price_scraping_collection is None:
         logger.error("Sync price scraping collection not initialized")
@@ -786,6 +786,12 @@ def save_price_data_sync(price_data: Dict) -> bool:
         
         # Normalize art variant for consistent cache operations
         original_art_variant = price_data.get("card_art_variant")
+        
+        # If we have a requested art variant but no art variant in price_data, use the requested one
+        if requested_art_variant and not original_art_variant:
+            original_art_variant = requested_art_variant
+            logger.info(f"🔧 Using requested art variant '{requested_art_variant}' as fallback (no art variant found in scraped data)")
+        
         normalized_art_variant = normalize_art_variant(original_art_variant)
         if normalized_art_variant:
             price_data["card_art_variant"] = normalized_art_variant
@@ -866,7 +872,8 @@ def save_price_data_sync(price_data: Dict) -> bool:
         if result.inserted_id:
             logger.info(f"✅ Created new sync price record with ID: {result.inserted_id}")
             
-            # Verify the record was saved correctly by querying back with normalized data
+            # Verify the record was saved correctly by using the SAME query logic as cache lookup
+            # This ensures complete consistency between save and lookup operations
             verification_query = {}
             if cleaned_data.get("card_number") and cleaned_data["card_number"] != "Unknown":
                 verification_query["card_number"] = cleaned_data["card_number"]
@@ -876,9 +883,12 @@ def save_price_data_sync(price_data: Dict) -> bool:
             if cleaned_data.get("card_rarity"):
                 verification_query["card_rarity"] = {"$regex": re.escape(cleaned_data["card_rarity"]), "$options": "i"}
                 
+            # Use exact same logic as cache lookup for art variant
             if cleaned_data.get("card_art_variant"):
-                # Use the normalized art variant for verification
                 verification_query["card_art_variant"] = cleaned_data["card_art_variant"]
+                logger.info(f"  🎨 Verification will use art variant filter: '{cleaned_data['card_art_variant']}'")
+            else:
+                logger.info(f"  🎨 No art variant in cleaned data - verification will not filter by art variant")
             
             logger.info(f"🔍 VERIFICATION: Checking if new record was saved with query: {verification_query}")
             
@@ -890,9 +900,32 @@ def save_price_data_sync(price_data: Dict) -> bool:
             if verification_docs:
                 logger.info(f"  ✅ Verification successful: Found {len(verification_docs)} matching record(s)")
                 for i, doc in enumerate(verification_docs):
-                    logger.info(f"    📄 Record {i+1}: ID={doc.get('_id')}, card_number={doc.get('card_number')}, art_variant={doc.get('card_art_variant')}, rarity={doc.get('card_rarity')}, last_update={doc.get('last_price_updt')}")
+                    logger.info(f"    📄 Record {i+1}: ID={doc.get('_id')}, card_number={doc.get('card_number')}, art_variant='{doc.get('card_art_variant')}', rarity='{doc.get('card_rarity')}', last_update={doc.get('last_price_updt')}")
             else:
                 logger.error(f"  ❌ VERIFICATION FAILED: Could not find the record we just inserted!")
+                logger.error(f"  🔍 Verification query was: {verification_query}")
+                logger.error(f"  📊 Let's check what records exist for this card...")
+                
+                # Debug: check what records actually exist for this card
+                debug_query = {}
+                if cleaned_data.get("card_number") and cleaned_data["card_number"] != "Unknown":
+                    debug_query["card_number"] = cleaned_data["card_number"]
+                elif cleaned_data.get("card_name"):
+                    debug_query["card_name"] = {"$regex": re.escape(cleaned_data["card_name"]), "$options": "i"}
+                
+                debug_docs = list(sync_price_scraping_collection.find(
+                    debug_query,
+                    {"card_number": 1, "card_art_variant": 1, "card_rarity": 1, "last_price_updt": 1, "_id": 1}
+                ).sort([("last_price_updt", -1)]).limit(5))
+                
+                if debug_docs:
+                    logger.error(f"  🔍 Found {len(debug_docs)} records for this card (without rarity/art filters):")
+                    for i, doc in enumerate(debug_docs):
+                        logger.error(f"    📄 Record {i+1}: ID={doc.get('_id')}, card_number={doc.get('card_number')}, art_variant='{doc.get('card_art_variant')}', rarity='{doc.get('card_rarity')}', last_update={doc.get('last_price_updt')}")
+                else:
+                    logger.error(f"  ❌ No records found at all for this card!")
+                    
+                return False
                 
             return True
         else:
@@ -2851,7 +2884,7 @@ def scrape_card_price():
         
         # Save cleaned data to cache
         try:
-            saved = save_price_data_sync(cleaned_price_data)
+            saved = save_price_data_sync(cleaned_price_data, art_variant)
             if not saved:
                 logger.warning(f"Failed to save price data to cache for {card_number}")
                 return jsonify({
