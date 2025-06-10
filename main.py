@@ -2220,39 +2220,16 @@ async def scrape_price_from_tcgplayer(
                     logger.info(f"Found card info in cache: {expected_card_info['card_name']} with rarities: {expected_card_info['available_rarities']}")
             
             # ALWAYS search TCGPlayer by card name, NEVER by card number
-            # Try multiple search strategies from most specific to least specific
             search_attempts = []
             
-            # If card name is provided, use it directly with different specificity levels
+            # If card name is provided, use it directly
             if card_name:
-                base_name = card_name.strip()
-                
-                # Strategy 1: Most specific - include rarity in search if available
-                if card_rarity:
-                    # Try searching with card name + rarity
-                    specific_query = f'"{base_name}" {card_rarity}'
-                    search_attempts.append((specific_query, "card name with rarity filter"))
-                
-                # Strategy 2: Medium specificity - use exact card name in quotes
-                search_attempts.append((f'"{base_name}"', "exact card name (quoted)"))
-                
-                # Strategy 3: Least specific - plain card name (fallback)
-                search_attempts.append((base_name, "plain card name"))
-                
+                search_attempts.append((card_name.strip(), "provided card name"))
             # If no card name, try looking it up from cache/API
             elif card_number:
                 looked_up_name = lookup_card_name(card_number)
                 if looked_up_name:
-                    base_name = looked_up_name
-                    
-                    # Apply same strategy for looked-up names
-                    if card_rarity:
-                        specific_query = f'"{base_name}" {card_rarity}'
-                        search_attempts.append((specific_query, "looked up name with rarity filter"))
-                    
-                    search_attempts.append((f'"{base_name}"', "exact looked up name (quoted)"))
-                    search_attempts.append((base_name, "plain looked up name"))
-                    
+                    search_attempts.append((looked_up_name, "looked up card name"))
                     # Update card_name for later use in verification
                     card_name = looked_up_name
                 else:
@@ -2269,17 +2246,11 @@ async def scrape_price_from_tcgplayer(
             successful_search = False
             search_url = None
             final_results_count = 0
-            best_search_url = None  # Track the URL of the best search so far
-            best_search_type = None
-            
-            # Define what constitutes a "manageable" result set
-            MAX_PREFERRED_RESULTS = TCGPLAYER_MAX_PREFERRED_RESULTS  # Prefer searches that return <= 50 results
-            MAX_ACCEPTABLE_RESULTS = TCGPLAYER_MAX_ACCEPTABLE_RESULTS  # Acceptable if <= 200 results
             
             for search_query, search_type in search_attempts:
                 search_url = f"https://www.tcgplayer.com/search/yugioh/product?Language=English&productLineName=yugioh&q={quote(search_query)}&view=grid"
                 
-                logger.info(f"Trying TCGPlayer search: {search_query} (using {search_type})")
+                logger.info(f"Searching TCGPlayer for: {search_query} (using {search_type})")
                 await page.goto(search_url, wait_until='networkidle', timeout=60000)
                 
                 # Check if we got results by looking for the results count
@@ -2291,49 +2262,29 @@ async def scrape_price_from_tcgplayer(
                     }
                 """)
                 
-                logger.info(f"Search '{search_type}' returned {results_count} results")
+                logger.info(f"Search returned {results_count} results")
                 
                 if results_count > 0:
-                    # Strategy: Use the first search that gives us manageable results
-                    if results_count <= MAX_PREFERRED_RESULTS:
-                        logger.info(f"✓ Excellent result count ({results_count} ≤ {MAX_PREFERRED_RESULTS}), using this search")
-                        successful_search = True
-                        final_results_count = results_count
-                        break
-                    elif results_count <= MAX_ACCEPTABLE_RESULTS:
-                        logger.info(f"✓ Acceptable result count ({results_count} ≤ {MAX_ACCEPTABLE_RESULTS}), using this search")
-                        successful_search = True
-                        final_results_count = results_count
-                        break
-                    else:
-                        logger.warning(f"Large result set ({results_count} results), trying more specific search...")
-                        # Remember this as a fallback option but continue looking for better
-                        if not best_search_url:  # Only remember the first large result set
-                            best_search_url = search_url
-                            best_search_type = search_type
-                            final_results_count = results_count
+                    successful_search = True
+                    final_results_count = results_count
+                    break
                 else:
                     logger.warning(f"No results found for {search_type}: {search_query}")
             
-            # If we didn't find a good search but have a fallback with large results, use it
-            if not successful_search and best_search_url:
-                logger.info(f"No optimal search found, using fallback search '{best_search_type}' with {final_results_count} results")
-                await page.goto(best_search_url, wait_until='networkidle', timeout=60000)
-                successful_search = True
-            
-            # Final check - if no search worked at all
             if not successful_search:
                 logger.error(f"No search query returned results for card {card_number or card_name}")
                 await browser.close()
                 return None
-            elif final_results_count > MAX_ACCEPTABLE_RESULTS:
-                logger.warning(f"Using search with large result set ({final_results_count} results) - will apply limiting during processing")
             
             # Check if we landed directly on a product page or on search results
             is_product_page = await page.evaluate("() => document.querySelector('.product-details, .product-title, h1[data-testid=\"product-name\"]') !== null")
             
             if not is_product_page:
-                # Determine processing limit based on result count
+                # Apply dynamic variant limiting based on result count for performance
+                # Keep the performance optimizations but with simpler logic
+                MAX_PREFERRED_RESULTS = TCGPLAYER_MAX_PREFERRED_RESULTS  # 50
+                MAX_ACCEPTABLE_RESULTS = TCGPLAYER_MAX_ACCEPTABLE_RESULTS  # 200
+                
                 if final_results_count <= MAX_PREFERRED_RESULTS:
                     # Small result set - process all results
                     variant_limit = final_results_count
