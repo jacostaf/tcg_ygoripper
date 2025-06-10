@@ -830,20 +830,69 @@ def save_price_data_sync(price_data: Dict) -> bool:
         if card_rarity and card_rarity.strip():
             lookup_query["card_rarity"] = {"$regex": re.escape(card_rarity.strip()), "$options": "i"}
         
-        # Add art variant to lookup query if provided (using exact match for art variant)
+        # Add art variant to lookup query if provided - use same pattern matching logic as cache lookup
         card_art_variant = price_data.get("card_art_variant")
         if card_art_variant and card_art_variant.strip():
-            lookup_query["card_art_variant"] = card_art_variant.strip()
+            art_variant_clean = card_art_variant.strip()
+            
+            # Use the same pattern matching logic as the cache lookup
+            # This ensures we delete the same records we would find during lookup
+            art_variant_queries = [art_variant_clean]  # Start with exact match
+            
+            # If requesting a number like "7", also try "7th", "7th Art", etc.
+            if art_variant_clean.isdigit():
+                num = art_variant_clean
+                suffix = "th"
+                if num.endswith("1") and not num.endswith("11"):
+                    suffix = "st"
+                elif num.endswith("2") and not num.endswith("12"):
+                    suffix = "nd"
+                elif num.endswith("3") and not num.endswith("13"):
+                    suffix = "rd"
+                
+                art_variant_queries.extend([
+                    f"{num}{suffix}",
+                    f"{num}{suffix} Art",
+                    f"{num}{suffix} art"
+                ])
+            
+            # Also try the pattern without any suffix (reverse case)
+            if not art_variant_clean.isdigit():
+                # Extract just the number if pattern like "7th Art" -> "7"
+                number_match = re.match(r'^(\d+)', art_variant_clean)
+                if number_match:
+                    art_variant_queries.append(number_match.group(1))
+            
+            # Delete records matching any of these art variant patterns
+            logger.info(f"Trying to delete records with art variant patterns: {art_variant_queries}")
+            
+            total_deleted = 0
+            for art_pattern in art_variant_queries:
+                pattern_query = {**lookup_query, "card_art_variant": art_pattern}
+                delete_result = sync_price_scraping_collection.delete_many(pattern_query)
+                if delete_result.deleted_count > 0:
+                    logger.info(f"Deleted {delete_result.deleted_count} records with art variant pattern '{art_pattern}'")
+                    total_deleted += delete_result.deleted_count
+            
+            if total_deleted > 0:
+                logger.info(f"Total deleted {total_deleted} records across all art variant patterns")
+            else:
+                logger.info("No existing records found to delete with any art variant pattern")
+            
+            # Don't run the main delete operation if we've already handled art variants
+            delete_executed = True
         
-        logger.info(f"Deleting existing records with lookup query: {lookup_query}")
-        
-        # Delete all existing records that match the lookup criteria
-        # This prevents accumulation of stale records and ensures cache consistency
-        delete_result = sync_price_scraping_collection.delete_many(lookup_query)
-        if delete_result.deleted_count > 0:
-            logger.info(f"Deleted {delete_result.deleted_count} existing records before saving new data")
-        else:
-            logger.info("No existing records found to delete")
+        # Only run main delete operation if we haven't already handled art variants
+        if 'delete_executed' not in locals():
+            logger.info(f"Deleting existing records with lookup query: {lookup_query}")
+            
+            # Delete all existing records that match the lookup criteria
+            # This prevents accumulation of stale records and ensures cache consistency
+            delete_result = sync_price_scraping_collection.delete_many(lookup_query)
+            if delete_result.deleted_count > 0:
+                logger.info(f"Deleted {delete_result.deleted_count} existing records before saving new data")
+            else:
+                logger.info("No existing records found to delete")
         
         # Clean the price_data before saving - remove empty strings
         cleaned_data = {}
@@ -898,10 +947,25 @@ def lookup_card_info_from_cache(card_number: str) -> Optional[Dict]:
             set_rarity = card_document.get('set_rarity', '')
             card_id = card_document.get('card_id')
             
-            # Find all variants of this card to get available rarities
+            # Find variants of this card only within the same set to avoid excessive logging
             if card_name:
-                variants_query = {"card_name": card_name}
-                all_variants = list(variants_collection.find(variants_query))
+                # Get the set code prefix from the card number (e.g., "RA04" from "RA04-EN106")
+                set_code_prefix = extract_set_code(card_number)
+                
+                if set_code_prefix:
+                    # Filter by both card_name and set_code prefix to only get variants from this set
+                    variants_query = {
+                        "card_name": card_name,
+                        "set_code": {"$regex": f"^{re.escape(set_code_prefix)}-", "$options": "i"}
+                    }
+                    logger.info(f"Looking for variants in set {set_code_prefix} for card {card_name}")
+                else:
+                    # Fallback: use card_name only but limit results
+                    variants_query = {"card_name": card_name}
+                    logger.info(f"No set code prefix found, using card_name only for {card_name}")
+                
+                # Limit the query to avoid excessive processing
+                all_variants = list(variants_collection.find(variants_query).limit(20))
                 
                 available_rarities = []
                 available_sets = []
@@ -918,10 +982,11 @@ def lookup_card_info_from_cache(card_number: str) -> Optional[Dict]:
                     'set_code': card_number,
                     'card_id': card_id,
                     'available_rarities': list(set(available_rarities)),
-                    'available_sets': list(set(available_sets))
+                    'available_sets': list(set(available_sets)),
+                    'set_filtered': bool(set_code_prefix)  # Indicates if we filtered by set
                 }
                 
-                logger.info(f"Found card info for {card_number}: {card_name}, rarities: {available_rarities}")
+                logger.info(f"Found card info for {card_number}: {card_name}, rarities from set {set_code_prefix or 'all sets'}: {list(set(available_rarities))}")
                 return card_info
         
         logger.warning(f"Card {card_number} not found in MongoDB cache")
