@@ -618,7 +618,6 @@ def find_cached_price_data_sync(
                 # Also try the pattern without any suffix (reverse case)
                 if not art_variant_clean.isdigit():
                     # Extract just the number if pattern like "7th Art" -> "7"
-                    import re
                     number_match = re.match(r'^(\d+)', art_variant_clean)
                     if number_match:
                         art_patterns.append(number_match.group(1))
