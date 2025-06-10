@@ -607,12 +607,24 @@ def find_cached_price_data_sync(
         if card_rarity:
             base_query["card_rarity"] = {"$regex": re.escape(card_rarity), "$options": "i"}
         
-        # Build query based on normalized art variant
-        if normalized_art_variant:
-            base_query["card_art_variant"] = normalized_art_variant
-            logger.info(f"  🎨 Using normalized art variant filter: '{normalized_art_variant}'")
+        # Build query based on art variant parameter
+        if art_variant is not None:
+            # art_variant was explicitly provided (could be "" or actual value)
+            if normalized_art_variant:
+                # Non-empty art variant provided
+                base_query["card_art_variant"] = normalized_art_variant
+                logger.info(f"  🎨 Using normalized art variant filter: '{normalized_art_variant}'")
+            else:
+                # Empty string art variant provided - look for records with no art variant
+                base_query["$or"] = [
+                    {"card_art_variant": {"$exists": False}},
+                    {"card_art_variant": None},
+                    {"card_art_variant": ""}
+                ]
+                logger.info(f"  🎨 Looking for records with no art variant (empty string provided)")
         else:
-            logger.info(f"  🎨 No art variant filter applied")
+            # art_variant parameter was not provided - find any matching record
+            logger.info(f"  🎨 No art variant filter applied (parameter not provided)")
         
         logger.info(f"  📋 Cache query: {base_query}")
         
@@ -790,7 +802,7 @@ def save_price_data_sync(price_data: Dict, requested_art_variant: Optional[str] 
         
         # If we have a requested art variant, always use it for cache consistency
         # This ensures that subsequent cache lookups with the same request will find the record
-        if requested_art_variant:
+        if requested_art_variant is not None:
             original_art_variant = requested_art_variant
             logger.info(f"🔧 Using requested art variant '{requested_art_variant}' for cache consistency (detected art variant was: '{price_data.get('card_art_variant')}')")
         elif not original_art_variant:
@@ -801,6 +813,12 @@ def save_price_data_sync(price_data: Dict, requested_art_variant: Optional[str] 
         if normalized_art_variant:
             price_data["card_art_variant"] = normalized_art_variant
             logger.info(f"🔧 Normalized art variant: '{original_art_variant}' -> '{normalized_art_variant}'")
+        else:
+            # If requested_art_variant was empty string, explicitly set to None for consistency
+            if requested_art_variant is not None and not requested_art_variant.strip():
+                price_data["card_art_variant"] = None
+                logger.info(f"🔧 Set card_art_variant to None for empty string request")
+            # If no art variant requested and none detected, let the existing value remain or be None
         
         # Update timestamp
         price_data['last_price_updt'] = datetime.now(UTC)
