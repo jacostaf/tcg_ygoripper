@@ -1075,9 +1075,15 @@ async def select_best_tcgplayer_variant(
     card_name: Optional[str], 
     card_rarity: Optional[str], 
     target_art_version: Optional[str],
-    expected_card_info: Optional[Dict] = None
+    expected_card_info: Optional[Dict] = None,
+    max_variants_to_process: int = 100
 ) -> Optional[str]:
-    """Select best card variant from TCGPlayer search results."""
+    """Select best card variant from TCGPlayer search results.
+    
+    Args:
+        max_variants_to_process: Maximum number of variants to evaluate (default 100)
+                                to prevent performance issues with large result sets
+    """
     try:
         logger.info("="*80)
         logger.info("STARTING TCGPLAYER VARIANT SELECTION")
@@ -1086,15 +1092,21 @@ async def select_best_tcgplayer_variant(
         logger.info(f"Target Art Version: {target_art_version}")
         logger.info("="*80)
         
-        # Extract all product links from TCGPlayer search results
-        variants = await page.evaluate(r"""
-            () => {
+        # Extract product links from TCGPlayer search results with limiting
+        max_variants = max_variants_to_process
+        variants = await page.evaluate("""
+            (maxVariants) => {
                 const variants = [];
                 
                 // TCGPlayer search results - look for product links directly
                 const productLinks = Array.from(document.querySelectorAll('a[href*="/product/"]'));
                 
-                productLinks.forEach(link => {
+                // Log total found and apply limiting
+                console.log('Found ' + productLinks.length + ' total product links');
+                const linksToProcess = productLinks.slice(0, maxVariants);
+                console.log('Processing first ' + linksToProcess.length + ' variants (limit: ' + maxVariants + ')');
+                
+                linksToProcess.forEach(link => {
                     const href = link.getAttribute('href');
                     
                     // Extract comprehensive product information from the link
@@ -1106,44 +1118,44 @@ async def select_best_tcgplayer_variant(
                     // Method 1: Extract from structured elements within the link
                     const heading = link.querySelector('h4');  // Set name is in h4
                     if (heading) {
-                        setName = heading.textContent?.trim() || '';
+                        setName = heading.textContent ? heading.textContent.trim() : '';
                     }
                     
                     // Find generic elements that contain the card information
                     const generics = link.querySelectorAll('generic');
                     generics.forEach(generic => {
-                        const text = generic.textContent?.trim() || '';
+                        const text = generic.textContent ? generic.textContent.trim() : '';
                         
                         // Look for card number (starts with #)
                         if (text.startsWith('#')) {
                             cardNumber = text.replace('#', '').trim();
                         }
                         // Enhanced rarity detection - look for complete rarity phrases
-                        else if (text.match(/quarter\s+century\s+secret\s+rare/i)) {
+                        else if (text.match(/quarter\\s+century\\s+secret\\s+rare/i)) {
                             rarity = 'Quarter Century Secret Rare';
                         }
-                        else if (text.match(/platinum\s+secret\s+rare/i)) {
+                        else if (text.match(/platinum\\s+secret\\s+rare/i)) {
                             rarity = 'Platinum Secret Rare';
                         }
-                        else if (text.match(/collector'?s\s+rare/i)) {
+                        else if (text.match(/collector'?s\\s+rare/i)) {
                             rarity = "Collector's Rare";
                         }
-                        else if (text.match(/starlight\s+rare/i)) {
+                        else if (text.match(/starlight\\s+rare/i)) {
                             rarity = 'Starlight Rare';
                         }
-                        else if (text.match(/secret\s+rare/i)) {
+                        else if (text.match(/secret\\s+rare/i)) {
                             rarity = 'Secret Rare';
                         }
-                        else if (text.match(/ultra\s+rare/i)) {
+                        else if (text.match(/ultra\\s+rare/i)) {
                             rarity = 'Ultra Rare';
                         }
-                        else if (text.match(/super\s+rare/i)) {
+                        else if (text.match(/super\\s+rare/i)) {
                             rarity = 'Super Rare';
                         }
-                        else if (text.match(/\bcommon\b/i)) {
+                        else if (text.match(/\\bcommon\\b/i)) {
                             rarity = 'Common';
                         }
-                        else if (text.match(/\brare\b/i) && !text.includes('$') && !text.includes('listings')) {
+                        else if (text.match(/\\brare\\b/i) && !text.includes('$') && !text.includes('listings')) {
                             rarity = 'Rare';
                         }
                         // Look for card name (longer text, contains letters, not price/listing info)
@@ -1163,21 +1175,21 @@ async def select_best_tcgplayer_variant(
                         // Check all text content in the link for rarity information
                         const allText = link.textContent || '';
                         
-                        if (allText.match(/quarter\s+century\s+secret\s+rare/i)) {
+                        if (allText.match(/quarter\\s+century\\s+secret\\s+rare/i)) {
                             rarity = 'Quarter Century Secret Rare';
-                        } else if (allText.match(/platinum\s+secret\s+rare/i)) {
+                        } else if (allText.match(/platinum\\s+secret\\s+rare/i)) {
                             rarity = 'Platinum Secret Rare';
-                        } else if (allText.match(/collector'?s\s+rare/i)) {
+                        } else if (allText.match(/collector'?s\\s+rare/i)) {
                             rarity = "Collector's Rare";
-                        } else if (allText.match(/starlight\s+rare/i)) {
+                        } else if (allText.match(/starlight\\s+rare/i)) {
                             rarity = 'Starlight Rare';
-                        } else if (allText.match(/secret\s+rare/i)) {
+                        } else if (allText.match(/secret\\s+rare/i)) {
                             rarity = 'Secret Rare';
-                        } else if (allText.match(/ultra\s+rare/i)) {
+                        } else if (allText.match(/ultra\\s+rare/i)) {
                             rarity = 'Ultra Rare';
-                        } else if (allText.match(/super\s+rare/i)) {
+                        } else if (allText.match(/super\\s+rare/i)) {
                             rarity = 'Super Rare';
-                        } else if (allText.match(/\bcommon\b/i)) {
+                        } else if (allText.match(/\\bcommon\\b/i)) {
                             rarity = 'Common';
                         }
                     }
@@ -1187,25 +1199,25 @@ async def select_best_tcgplayer_variant(
                     if (cardName) {
                         title = cardName;
                         if (setName) {
-                            title += ` - ${setName}`;
+                            title += ' - ' + setName;
                         }
                         if (rarity) {
-                            title += ` (${rarity})`;
+                            title += ' (' + rarity + ')';
                         }
                         if (cardNumber) {
-                            title += ` [${cardNumber}]`;
+                            title += ' [' + cardNumber + ']';
                         }
                     } else {
                         // Fallback: use all text content and clean it up
-                        const allText = link.textContent?.trim() || '';
+                        const allText = link.textContent ? link.textContent.trim() : '';
                         // Take first meaningful part before price info
-                        const parts = allText.split(/Market Price:|listings from|\$/);
-                        title = parts[0]?.trim() || '';
+                        const parts = allText.split(/Market Price:|listings from|\\$/);
+                        title = parts[0] ? parts[0].trim() : '';
                     }
                     
                     if (href && title) {
                         // Make sure href is absolute
-                        const fullHref = href.startsWith('http') ? href : `https://www.tcgplayer.com${href}`;
+                        const fullHref = href.startsWith('http') ? href : 'https://www.tcgplayer.com' + href;
                         
                         variants.push({
                             title: title,
@@ -1220,7 +1232,7 @@ async def select_best_tcgplayer_variant(
                 
                 return variants;
             }
-        """)
+        """, max_variants)
 
         if not variants:
             logger.warning("No variants found in TCGPlayer search results")
@@ -1235,6 +1247,12 @@ async def select_best_tcgplayer_variant(
             return None
             
         logger.info(f"Found {len(variants)} variants to check")
+        
+        # Log if we hit the processing limit
+        total_available = await page.evaluate("() => document.querySelectorAll('a[href*=\"/product/\"]').length")
+        if total_available > max_variants_to_process:
+            logger.warning(f"Large result set detected: {total_available} total variants found, processing first {max_variants_to_process} (limit)")
+            logger.info("Consider using more specific search terms or rarity filters to reduce result set size")
         
         # Score variants based on card number, rarity, card name, and art variant matches
         scored_variants = []
@@ -2235,7 +2253,7 @@ async def scrape_price_from_tcgplayer(
             if not is_product_page:
                 # We're on search results, select best variant
                 best_variant_url = await select_best_tcgplayer_variant(
-                    page, card_number, card_name, card_rarity, art_variant, expected_card_info
+                    page, card_number, card_name, card_rarity, art_variant, expected_card_info, max_variants_to_process=100
                 )
                 
                 if best_variant_url:
