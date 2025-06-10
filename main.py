@@ -1022,7 +1022,8 @@ def extract_set_code(card_number: str) -> Optional[str]:
         return None
     
     # Most Yu-Gi-Oh card numbers follow the pattern: SETCODE-REGION###
-    match = re.match(r'^([A-Z]{2,4})-[A-Z]{2}\d+$', card_number.upper())
+    # Handle both numeric and alphanumeric card numbers
+    match = re.match(r'^([A-Z]+\d*)-[A-Z]{2}\d+$', card_number.upper())
     if match:
         set_code = match.group(1)
         logger.debug(f"Extracted set code: {set_code} from card number: {card_number}")
@@ -1036,6 +1037,87 @@ def extract_set_code(card_number: str) -> Optional[str]:
             return potential_set_code
     
     logger.debug(f"Could not extract set code from card number: {card_number}")
+    return None
+
+def map_set_code_to_tcgplayer_name(set_code: str) -> Optional[str]:
+    """Map YGO set code to TCGPlayer set name for filtering."""
+    if not set_code:
+        return None
+    
+    # Known mappings from set codes to TCGPlayer set names
+    # These are the exact names as they appear in TCGPlayer's filter dropdowns
+    set_code_mappings = {
+        'RA04': 'Quarter Century Stampede',  # RA04 is Quarter Century Stampede
+        'RA03': 'Quarter Century Bonanza',   # RA03 is Quarter Century Bonanza
+        'SUDA': 'Speed Duel Decks: Destiny Masters',
+        'SBCB': 'Speed Duel: Battle City Box',
+        'LEDD': 'Legendary Dragon Decks',
+        'DUSA': 'Duelist Saga',
+        'DUPO': 'Duel Power',
+        'MVP1': 'The Dark Side of Dimensions Movie Pack: Secret Edition',
+        'MGED': 'Maximum Gold: El Dorado',
+        'MAGO': 'Maximum Gold',
+        'CT13': '2016 Mega-Tins',
+        'CT14': '2017 Mega-Tins',
+        'LC01': 'Legendary Collection 1',
+        'LDK2': 'Legendary Decks II',
+        'SDY': 'Starter Deck: Yugi',
+        'SYE': 'Starter Deck: Yugi Evolution',
+        'SD6': 'Structure Deck: Spellcaster\'s Judgment',
+        'STAX': '2-Player Starter Set',
+        'LOB': 'The Legend of Blue Eyes White Dragon',
+        'BPT': '2002 Collectors Tin',
+        'DB1': 'Dark Beginning 1',
+        'JUMP': 'Shonen Jump Magazine Promos',
+        'DPBC': 'Duelist Pack: Battle City',
+        'SBC2': 'Speed Duel: Battle City Finals',
+        'SS01': 'Speed Duel Decks: Destiny Masters'
+    }
+    
+    tcgplayer_set_name = set_code_mappings.get(set_code.upper())
+    if tcgplayer_set_name:
+        logger.debug(f"Mapped set code {set_code} to TCGPlayer set name: {tcgplayer_set_name}")
+        return tcgplayer_set_name
+    
+    logger.debug(f"No TCGPlayer set name mapping found for set code: {set_code}")
+    return None
+
+def map_rarity_to_tcgplayer_filter(rarity: str) -> Optional[str]:
+    """Map YGO rarity to TCGPlayer rarity filter value."""
+    if not rarity:
+        return None
+    
+    rarity_lower = rarity.lower().strip()
+    
+    # Map common rarity variations to TCGPlayer filter values
+    # These need to match exactly how they appear in TCGPlayer's filter dropdown
+    rarity_mappings = {
+        'platinum secret rare': 'Platinum Secret Rare',
+        'quarter century secret rare': 'Quarter Century Secret Rare', 
+        'secret rare': 'Secret Rare',
+        'ultra rare': 'Ultra Rare',
+        'super rare': 'Super Rare',
+        'rare': 'Rare',
+        'common': 'Common / Short Print',
+        'common / short print': 'Common / Short Print',
+        'starlight rare': 'Starlight Rare',
+        'collector\'s rare': 'Collector\'s Rare',
+        'collectors rare': 'Collector\'s Rare',
+        'ghost rare': 'Ghost Rare',
+        'gold rare': 'Gold Rare',
+        'premium gold rare': 'Premium Gold Rare',
+        'prismatic secret rare': 'Prismatic Secret Rare',
+        'prismatic ultimate rare': 'Prismatic Ultimate Rare',
+        'ultimate rare': 'Ultimate Rare',
+        'starfoil rare': 'Starfoil Rare'
+    }
+    
+    tcgplayer_rarity = rarity_mappings.get(rarity_lower)
+    if tcgplayer_rarity:
+        logger.debug(f"Mapped rarity '{rarity}' to TCGPlayer filter: {tcgplayer_rarity}")
+        return tcgplayer_rarity
+    
+    logger.debug(f"No TCGPlayer rarity filter mapping found for: {rarity}")
     return None
 
 def extract_booster_set_name(source_url: str) -> Optional[str]:
@@ -2233,33 +2315,86 @@ async def scrape_price_from_tcgplayer(
                 await browser.close()
                 return None
             
+            # Extract set code and map to TCGPlayer set name for filtering
+            tcgplayer_set_name = None
+            tcgplayer_rarity_filter = None
+            
+            if card_number:
+                set_code = extract_set_code(card_number)
+                if set_code:
+                    tcgplayer_set_name = map_set_code_to_tcgplayer_name(set_code)
+                    if tcgplayer_set_name:
+                        logger.info(f"Extracted set code '{set_code}' from card number '{card_number}', mapped to TCGPlayer set: '{tcgplayer_set_name}'")
+            
+            if card_rarity:
+                tcgplayer_rarity_filter = map_rarity_to_tcgplayer_filter(card_rarity)
+                if tcgplayer_rarity_filter:
+                    logger.info(f"Mapped rarity '{card_rarity}' to TCGPlayer filter: '{tcgplayer_rarity_filter}'")
+            
             successful_search = False
             search_url = None
             final_results_count = 0
             
+            # Build search attempts with filtering preference:
+            # 1. First try with both set and rarity filters (most specific)
+            # 2. Then try with just set filter 
+            # 3. Then try with just rarity filter
+            # 4. Finally try with no filters (fallback)
+            filter_attempts = []
+            
+            if tcgplayer_set_name and tcgplayer_rarity_filter:
+                filter_attempts.append((tcgplayer_set_name, tcgplayer_rarity_filter, "set and rarity filters"))
+            if tcgplayer_set_name:
+                filter_attempts.append((tcgplayer_set_name, None, "set filter only"))
+            if tcgplayer_rarity_filter:
+                filter_attempts.append((None, tcgplayer_rarity_filter, "rarity filter only"))
+            filter_attempts.append((None, None, "no filters"))
+            
             for search_query, search_type in search_attempts:
-                search_url = f"https://www.tcgplayer.com/search/yugioh/product?Language=English&productLineName=yugioh&q={quote(search_query)}&view=grid"
+                for set_filter, rarity_filter, filter_description in filter_attempts:
+                    # Build base search URL
+                    search_url = f"https://www.tcgplayer.com/search/yugioh/product?Language=English&productLineName=yugioh&q={quote(search_query)}&view=grid"
+                    
+                    # Add set filter if available
+                    if set_filter:
+                        # URL encode the set name for the filter parameter  
+                        encoded_set = quote(set_filter)
+                        search_url += f"&Set={encoded_set}"
+                    
+                    # Add rarity filter if available
+                    if rarity_filter:
+                        # URL encode the rarity for the filter parameter
+                        encoded_rarity = quote(rarity_filter)
+                        search_url += f"&Rarity={encoded_rarity}"
+                    
+                    logger.info(f"Searching TCGPlayer for: '{search_query}' with {filter_description}")
+                    if set_filter:
+                        logger.info(f"  Set filter: {set_filter}")
+                    if rarity_filter:
+                        logger.info(f"  Rarity filter: {rarity_filter}")
+                    
+                    await page.goto(search_url, wait_until='networkidle', timeout=60000)
+                    
+                    # Check if we got results by looking for the results count
+                    results_count = await page.evaluate("""
+                        () => {
+                            const resultText = document.querySelector('h1')?.textContent || '';
+                            const match = resultText.match(/(\\d+)\\s+results?\\s+for/);
+                            return match ? parseInt(match[1]) : 0;
+                        }
+                    """)
+                    
+                    logger.info(f"Search with {filter_description} returned {results_count} results")
+                    
+                    if results_count > 0:
+                        successful_search = True
+                        final_results_count = results_count
+                        break
+                    else:
+                        logger.warning(f"No results found for {search_type} with {filter_description}")
                 
-                logger.info(f"Searching TCGPlayer for: {search_query} (using {search_type})")
-                await page.goto(search_url, wait_until='networkidle', timeout=60000)
-                
-                # Check if we got results by looking for the results count
-                results_count = await page.evaluate("""
-                    () => {
-                        const resultText = document.querySelector('h1')?.textContent || '';
-                        const match = resultText.match(/(\\d+)\\s+results?\\s+for/);
-                        return match ? parseInt(match[1]) : 0;
-                    }
-                """)
-                
-                logger.info(f"Search returned {results_count} results")
-                
-                if results_count > 0:
-                    successful_search = True
-                    final_results_count = results_count
+                if successful_search:
                     break
-                else:
-                    logger.warning(f"No results found for {search_type}: {search_query}")
             
             if not successful_search:
                 logger.error(f"No search query returned results for card {card_number or card_name}")
