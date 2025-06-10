@@ -823,8 +823,8 @@ def save_price_data_sync(price_data: Dict, requested_art_variant: Optional[str] 
         # Update timestamp
         price_data['last_price_updt'] = datetime.now(UTC)
         
-        # Build simplified deletion strategy: delete ALL records matching card_number + rarity
-        # This ensures complete cache consistency without complex pattern matching
+        # Build deletion strategy: delete records matching card_number + rarity + art_variant
+        # This ensures we only delete the exact variant being replaced, allowing different art variants to coexist
         deletion_query = {}
         
         # Use card_number as primary identifier if available
@@ -838,7 +838,20 @@ def save_price_data_sync(price_data: Dict, requested_art_variant: Optional[str] 
         if card_rarity and card_rarity.strip():
             deletion_query["card_rarity"] = {"$regex": re.escape(card_rarity.strip()), "$options": "i"}
         
-        logger.info(f"🗑️ SIMPLIFIED CACHE DELETION: Deleting ALL records matching card + rarity to ensure consistency")
+        # Add art variant to deletion query to prevent deleting different art variants
+        # This is crucial for allowing multiple art variants of the same card+rarity to coexist
+        if normalized_art_variant:
+            # Delete records with this specific art variant
+            deletion_query["card_art_variant"] = normalized_art_variant
+        else:
+            # Delete records with no art variant (None, empty string, or missing field)
+            deletion_query["$or"] = [
+                {"card_art_variant": {"$exists": False}},
+                {"card_art_variant": None},
+                {"card_art_variant": ""}
+            ]
+        
+        logger.info(f"🗑️ TARGETED CACHE DELETION: Deleting records matching card + rarity + art variant to preserve other variants")
         logger.info(f"🗑️ Deletion query: {deletion_query}")
         
         # Check what we're about to delete
