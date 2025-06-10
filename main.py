@@ -2266,6 +2266,8 @@ async def scrape_price_from_tcgplayer(
             successful_search = False
             search_url = None
             final_results_count = 0
+            best_search_url = None  # Track the URL of the best search so far
+            best_search_type = None
             
             # Define what constitutes a "manageable" result set
             MAX_PREFERRED_RESULTS = TCGPLAYER_MAX_PREFERRED_RESULTS  # Prefer searches that return <= 50 results
@@ -2289,26 +2291,35 @@ async def scrape_price_from_tcgplayer(
                 logger.info(f"Search '{search_type}' returned {results_count} results")
                 
                 if results_count > 0:
-                    final_results_count = results_count
-                    
                     # Strategy: Use the first search that gives us manageable results
                     if results_count <= MAX_PREFERRED_RESULTS:
                         logger.info(f"✓ Excellent result count ({results_count} ≤ {MAX_PREFERRED_RESULTS}), using this search")
                         successful_search = True
+                        final_results_count = results_count
                         break
                     elif results_count <= MAX_ACCEPTABLE_RESULTS:
                         logger.info(f"✓ Acceptable result count ({results_count} ≤ {MAX_ACCEPTABLE_RESULTS}), using this search")
                         successful_search = True
+                        final_results_count = results_count
                         break
                     else:
                         logger.warning(f"Large result set ({results_count} results), trying more specific search...")
-                        # Don't break here - try more specific searches
-                        successful_search = True  # Mark as successful but continue looking for better
+                        # Remember this as a fallback option but continue looking for better
+                        if not best_search_url:  # Only remember the first large result set
+                            best_search_url = search_url
+                            best_search_type = search_type
+                            final_results_count = results_count
                 else:
                     logger.warning(f"No results found for {search_type}: {search_query}")
             
-            # If we tried all searches and only have large result sets, use the last successful one
-            if not successful_search and final_results_count == 0:
+            # If we didn't find a good search but have a fallback with large results, use it
+            if not successful_search and best_search_url:
+                logger.info(f"No optimal search found, using fallback search '{best_search_type}' with {final_results_count} results")
+                await page.goto(best_search_url, wait_until='networkidle', timeout=60000)
+                successful_search = True
+            
+            # Final check - if no search worked at all
+            if not successful_search:
                 logger.error(f"No search query returned results for card {card_number or card_name}")
                 await browser.close()
                 return None
