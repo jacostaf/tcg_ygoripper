@@ -580,13 +580,18 @@ def find_cached_price_data_sync(
         
         # Build query based on art variant
         if art_variant and art_variant.strip():
-            normalized_art = re.sub(r'(st|nd|rd|th)$', '', art_variant.lower().strip())
+            # Use exact match for art variant to ensure we get the right cached entry
+            # This prevents returning cached data for a different art variant
             query = {
                 **base_query,
-                "card_art_variant": {"$regex": f"^{re.escape(normalized_art)}(st|nd|rd|th)?$", "$options": "i"}
+                "card_art_variant": art_variant.strip()
             }
+            logger.info(f"  🎨 Using exact art variant match: '{art_variant.strip()}'")
         else:
             query = base_query
+            logger.info(f"  🎨 No art variant filter applied")
+        
+        logger.info(f"  📋 Cache query: {query}")
         
         # Find documents with projection and sort
         documents = list(sync_price_scraping_collection.find(
@@ -595,8 +600,11 @@ def find_cached_price_data_sync(
             sort=[("last_price_updt", -1)]
         ).limit(5))
         
+        logger.info(f"  📄 Found {len(documents)} matching documents in cache")
+        
         # Process and return the first valid document
-        for doc in documents:
+        for i, doc in enumerate(documents):
+            logger.info(f"  📄 Document {i+1}: card_art_variant='{doc.get('card_art_variant', 'N/A')}', card_rarity='{doc.get('card_rarity', 'N/A')}'")
             # Convert last_price_updt to proper format
             if 'last_price_updt' in doc:
                 last_update = doc['last_price_updt']
@@ -607,6 +615,7 @@ def find_cached_price_data_sync(
                     pass
             return _check_freshness_and_return(doc)
         
+        logger.info(f"  ❌ No matching documents found in cache")
         return False, None
         
     except Exception as e:
@@ -2665,19 +2674,11 @@ def scrape_card_price():
         
         # Check cache first unless force refresh is requested
         if not force_refresh:
-            # Normalize art variant before cache lookup
-            normalized_art = None
-            if art_variant:
-                if art_variant.isdigit() or any(suffix in art_variant.lower() for suffix in ['st', 'nd', 'rd', 'th']):
-                    normalized_art = re.sub(r'(st|nd|rd|th)$', '', art_variant.lower().strip())
-                else:
-                    normalized_art = art_variant.lower().strip()
-            
             is_fresh, cached_data = find_cached_price_data_sync(
                 card_number=card_number,
                 card_name=card_name,
                 card_rarity=card_rarity,
-                art_variant=normalized_art
+                art_variant=art_variant  # Use exact art variant for cache lookup
             )
             
             if is_fresh and cached_data:
