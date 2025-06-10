@@ -1257,22 +1257,17 @@ async def select_best_tcgplayer_variant(
                 logger.warning("Unknown issue with TCGPlayer search results extraction")
             return None
             
-        logger.info(f"Found {len(variants)} variants to check")
+        logger.info(f"Found {len(variants)} variants to check - will process ALL variants (no early termination)")
         
         # Log if we hit the processing limit
         total_available = await page.evaluate("() => document.querySelectorAll('a[href*=\"/product/\"]').length")
         if total_available > max_variants_to_process:
             logger.warning(f"Large result set detected: {total_available} total variants found, processing first {max_variants_to_process} (limit)")
-            logger.info("Consider using more specific search terms or rarity filters to reduce result set size")
+            logger.info(f"Processing limit applied to prevent excessive processing time. All {max_variants_to_process} variants will still be evaluated.")
         
         # Score variants based on card number, rarity, card name, and art variant matches
-        # Process variants efficiently with early termination for high-confidence matches
+        # Process ALL variants to ensure we don't miss the correct card
         scored_variants = []
-        
-        # Early termination threshold - if we find a variant with this score or higher, 
-        # and we've processed at least 10 variants, we can stop early
-        EARLY_TERMINATION_SCORE = TCGPLAYER_EARLY_TERMINATION_SCORE  # Very high confidence match
-        MIN_VARIANTS_BEFORE_EARLY_TERMINATION = TCGPLAYER_MIN_VARIANTS_BEFORE_EARLY_TERMINATION
         
         for i, variant in enumerate(variants):
             score = 0
@@ -1463,12 +1458,7 @@ async def select_best_tcgplayer_variant(
             scored_variants.append((score, variant))
             logger.info(f"Final Score: {score} | Variant: {variant['title'][:80]}...")
             
-            # Early termination check - if we found a very high confidence match
-            # and have processed enough variants, we can stop here
-            if (score >= EARLY_TERMINATION_SCORE and 
-                i >= MIN_VARIANTS_BEFORE_EARLY_TERMINATION):
-                logger.info(f"🎯 Early termination: Found high-confidence match (score: {score}) after {i+1} variants")
-                break
+            # Continue processing ALL variants as requested - no early termination
         
         # Sort by score and return the best match
         scored_variants.sort(reverse=True, key=lambda x: x[0])
