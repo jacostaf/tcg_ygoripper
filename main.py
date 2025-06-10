@@ -835,9 +835,26 @@ def save_price_data_sync(price_data: Dict) -> bool:
         if card_art_variant and card_art_variant.strip():
             art_variant_clean = card_art_variant.strip()
             
-            # Use the same pattern matching logic as the cache lookup
+            logger.info(f"🗑️ CACHE DELETION: Preparing to delete records for art variant '{art_variant_clean}'")
+            
+            # Use the EXACT same pattern matching logic as the cache lookup
             # This ensures we delete the same records we would find during lookup
-            art_variant_queries = [art_variant_clean]  # Start with exact match
+            art_variant_queries = []
+            
+            # Step 1: Try exact match first (same as cache lookup logic)
+            exact_query = {**lookup_query, "card_art_variant": art_variant_clean}
+            logger.info(f"  🎯 Checking for exact match records to delete with query: {exact_query}")
+            
+            # Count existing records with exact match
+            exact_count = sync_price_scraping_collection.count_documents(exact_query)
+            if exact_count > 0:
+                logger.info(f"  🎯 Found {exact_count} records with exact art variant match '{art_variant_clean}'")
+                art_variant_queries.append(art_variant_clean)
+            else:
+                logger.info(f"  🎯 No exact match found for art variant '{art_variant_clean}'")
+            
+            # Step 2: Generate pattern matches (same as cache lookup logic)
+            art_patterns = []
             
             # If requesting a number like "7", also try "7th", "7th Art", etc.
             if art_variant_clean.isdigit():
@@ -850,7 +867,7 @@ def save_price_data_sync(price_data: Dict) -> bool:
                 elif num.endswith("3") and not num.endswith("13"):
                     suffix = "rd"
                 
-                art_variant_queries.extend([
+                art_patterns.extend([
                     f"{num}{suffix}",
                     f"{num}{suffix} Art",
                     f"{num}{suffix} art"
@@ -861,38 +878,108 @@ def save_price_data_sync(price_data: Dict) -> bool:
                 # Extract just the number if pattern like "7th Art" -> "7"
                 number_match = re.match(r'^(\d+)', art_variant_clean)
                 if number_match:
-                    art_variant_queries.append(number_match.group(1))
+                    art_patterns.append(number_match.group(1))
             
-            # Delete records matching any of these art variant patterns
-            logger.info(f"Trying to delete records with art variant patterns: {art_variant_queries}")
+            # Step 3: Check each pattern and add to deletion list if records exist
+            for pattern in art_patterns:
+                pattern_query = {**lookup_query, "card_art_variant": pattern}
+                pattern_count = sync_price_scraping_collection.count_documents(pattern_query)
+                if pattern_count > 0:
+                    logger.info(f"  🎨 Found {pattern_count} records with art variant pattern '{pattern}'")
+                    art_variant_queries.append(pattern)
+                    # Found a match, same as cache lookup logic - stop here
+                    break
+                else:
+                    logger.info(f"  🎨 No records found with art variant pattern '{pattern}'")
             
-            total_deleted = 0
-            for art_pattern in art_variant_queries:
-                pattern_query = {**lookup_query, "card_art_variant": art_pattern}
-                delete_result = sync_price_scraping_collection.delete_many(pattern_query)
-                if delete_result.deleted_count > 0:
-                    logger.info(f"Deleted {delete_result.deleted_count} records with art variant pattern '{art_pattern}'")
-                    total_deleted += delete_result.deleted_count
-            
-            if total_deleted > 0:
-                logger.info(f"Total deleted {total_deleted} records across all art variant patterns")
+            # Step 4: Delete all matching records
+            if art_variant_queries:
+                logger.info(f"🗑️ Deleting records with art variant queries: {art_variant_queries}")
+                
+                total_deleted = 0
+                for art_pattern in art_variant_queries:
+                    pattern_query = {**lookup_query, "card_art_variant": art_pattern}
+                    logger.info(f"  🗑️ Deleting with query: {pattern_query}")
+                    
+                    # Show what we're about to delete
+                    docs_to_delete = list(sync_price_scraping_collection.find(
+                        pattern_query, 
+                        {"card_number": 1, "card_art_variant": 1, "card_rarity": 1, "last_price_updt": 1}
+                    ))
+                    
+                    for doc in docs_to_delete:
+                        logger.info(f"    🗑️ Will delete: card_number={doc.get('card_number')}, art_variant={doc.get('card_art_variant')}, rarity={doc.get('card_rarity')}, last_update={doc.get('last_price_updt')}")
+                    
+                    delete_result = sync_price_scraping_collection.delete_many(pattern_query)
+                    deleted_count = delete_result.deleted_count
+                    total_deleted += deleted_count
+                    
+                    if deleted_count > 0:
+                        logger.info(f"  ✅ Successfully deleted {deleted_count} records with art variant pattern '{art_pattern}'")
+                    else:
+                        logger.warning(f"  ⚠️ Expected to delete records but deleted 0 with pattern '{art_pattern}'")
+                
+                # Step 5: Verify deletion was successful
+                logger.info(f"🔍 VERIFICATION: Checking if deletion was successful...")
+                for art_pattern in art_variant_queries:
+                    pattern_query = {**lookup_query, "card_art_variant": art_pattern}
+                    remaining_count = sync_price_scraping_collection.count_documents(pattern_query)
+                    if remaining_count > 0:
+                        logger.error(f"  ❌ DELETION FAILED: Still found {remaining_count} records with pattern '{art_pattern}' after deletion!")
+                        # List the remaining documents
+                        remaining_docs = list(sync_price_scraping_collection.find(
+                            pattern_query, 
+                            {"card_number": 1, "card_art_variant": 1, "card_rarity": 1, "last_price_updt": 1}
+                        ))
+                        for doc in remaining_docs:
+                            logger.error(f"    🔍 Remaining: card_number={doc.get('card_number')}, art_variant={doc.get('card_art_variant')}, rarity={doc.get('card_rarity')}, last_update={doc.get('last_price_updt')}")
+                    else:
+                        logger.info(f"  ✅ Verification successful: No records remaining with pattern '{art_pattern}'")
+                
+                logger.info(f"🗑️ Total deleted {total_deleted} records across all art variant patterns")
             else:
-                logger.info("No existing records found to delete with any art variant pattern")
+                logger.info("🗑️ No existing records found to delete with any art variant pattern")
             
             # Don't run the main delete operation if we've already handled art variants
             delete_executed = True
         
         # Only run main delete operation if we haven't already handled art variants
         if 'delete_executed' not in locals():
-            logger.info(f"Deleting existing records with lookup query: {lookup_query}")
+            logger.info(f"🗑️ CACHE DELETION: Deleting existing records with lookup query: {lookup_query}")
+            
+            # Show what we're about to delete
+            docs_to_delete = list(sync_price_scraping_collection.find(
+                lookup_query, 
+                {"card_number": 1, "card_art_variant": 1, "card_rarity": 1, "last_price_updt": 1}
+            ))
+            
+            if docs_to_delete:
+                logger.info(f"  🗑️ Found {len(docs_to_delete)} records to delete:")
+                for doc in docs_to_delete:
+                    logger.info(f"    🗑️ Will delete: card_number={doc.get('card_number')}, art_variant={doc.get('card_art_variant')}, rarity={doc.get('card_rarity')}, last_update={doc.get('last_price_updt')}")
             
             # Delete all existing records that match the lookup criteria
             # This prevents accumulation of stale records and ensures cache consistency
             delete_result = sync_price_scraping_collection.delete_many(lookup_query)
-            if delete_result.deleted_count > 0:
-                logger.info(f"Deleted {delete_result.deleted_count} existing records before saving new data")
+            deleted_count = delete_result.deleted_count
+            
+            if deleted_count > 0:
+                logger.info(f"  ✅ Successfully deleted {deleted_count} existing records before saving new data")
+                
+                # Verify deletion was successful
+                remaining_count = sync_price_scraping_collection.count_documents(lookup_query)
+                if remaining_count > 0:
+                    logger.error(f"  ❌ DELETION FAILED: Still found {remaining_count} records after deletion!")
+                    remaining_docs = list(sync_price_scraping_collection.find(
+                        lookup_query, 
+                        {"card_number": 1, "card_art_variant": 1, "card_rarity": 1, "last_price_updt": 1}
+                    ))
+                    for doc in remaining_docs:
+                        logger.error(f"    🔍 Remaining: card_number={doc.get('card_number')}, art_variant={doc.get('card_art_variant')}, rarity={doc.get('card_rarity')}, last_update={doc.get('last_price_updt')}")
+                else:
+                    logger.info(f"  ✅ Verification successful: No records remaining with lookup query")
             else:
-                logger.info("No existing records found to delete")
+                logger.info("  📭 No existing records found to delete")
         
         # Clean the price_data before saving - remove empty strings
         cleaned_data = {}
@@ -914,10 +1001,38 @@ def save_price_data_sync(price_data: Dict) -> bool:
         result = sync_price_scraping_collection.insert_one(cleaned_data)
         
         if result.inserted_id:
-            logger.info(f"Created new sync price record with ID: {result.inserted_id}")
+            logger.info(f"✅ Created new sync price record with ID: {result.inserted_id}")
+            
+            # Verify the record was saved correctly by querying back
+            verification_query = {}
+            if cleaned_data.get("card_number") and cleaned_data["card_number"] != "Unknown":
+                verification_query["card_number"] = cleaned_data["card_number"]
+            elif cleaned_data.get("card_name"):
+                verification_query["card_name"] = {"$regex": re.escape(cleaned_data["card_name"]), "$options": "i"}
+                
+            if cleaned_data.get("card_rarity"):
+                verification_query["card_rarity"] = {"$regex": re.escape(cleaned_data["card_rarity"]), "$options": "i"}
+                
+            if cleaned_data.get("card_art_variant"):
+                verification_query["card_art_variant"] = cleaned_data["card_art_variant"]
+            
+            logger.info(f"🔍 VERIFICATION: Checking if new record was saved with query: {verification_query}")
+            
+            verification_docs = list(sync_price_scraping_collection.find(
+                verification_query,
+                {"card_number": 1, "card_art_variant": 1, "card_rarity": 1, "last_price_updt": 1, "_id": 1}
+            ).sort([("last_price_updt", -1)]).limit(3))
+            
+            if verification_docs:
+                logger.info(f"  ✅ Verification successful: Found {len(verification_docs)} matching record(s)")
+                for i, doc in enumerate(verification_docs):
+                    logger.info(f"    📄 Record {i+1}: ID={doc.get('_id')}, card_number={doc.get('card_number')}, art_variant={doc.get('card_art_variant')}, rarity={doc.get('card_rarity')}, last_update={doc.get('last_price_updt')}")
+            else:
+                logger.error(f"  ❌ VERIFICATION FAILED: Could not find the record we just inserted!")
+                
             return True
         else:
-            logger.warning("Failed to insert new sync price record")
+            logger.warning("❌ Failed to insert new sync price record")
             return False
         
     except Exception as e:
