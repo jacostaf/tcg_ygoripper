@@ -785,12 +785,17 @@ def save_price_data_sync(price_data: Dict, requested_art_variant: Optional[str] 
             return False
         
         # Normalize art variant for consistent cache operations
+        # Prioritize requested art variant over detected art variant for cache consistency
         original_art_variant = price_data.get("card_art_variant")
         
-        # If we have a requested art variant but no art variant in price_data, use the requested one
-        if requested_art_variant and not original_art_variant:
+        # If we have a requested art variant, always use it for cache consistency
+        # This ensures that subsequent cache lookups with the same request will find the record
+        if requested_art_variant:
             original_art_variant = requested_art_variant
-            logger.info(f"🔧 Using requested art variant '{requested_art_variant}' as fallback (no art variant found in scraped data)")
+            logger.info(f"🔧 Using requested art variant '{requested_art_variant}' for cache consistency (detected art variant was: '{price_data.get('card_art_variant')}')")
+        elif not original_art_variant:
+            # No requested variant and no detected variant
+            original_art_variant = None
         
         normalized_art_variant = normalize_art_variant(original_art_variant)
         if normalized_art_variant:
@@ -867,6 +872,12 @@ def save_price_data_sync(price_data: Dict, requested_art_variant: Optional[str] 
             return False
         
         # Insert the new record (we deleted matching ones above, so this will always be an insert)
+        logger.info(f"💾 About to save record with the following key fields:")
+        logger.info(f"  💾 card_number: '{cleaned_data.get('card_number')}'")
+        logger.info(f"  💾 card_name: '{cleaned_data.get('card_name')}'") 
+        logger.info(f"  💾 card_art_variant: '{cleaned_data.get('card_art_variant')}'")
+        logger.info(f"  💾 card_rarity: '{cleaned_data.get('card_rarity')}'")
+        
         result = sync_price_scraping_collection.insert_one(cleaned_data)
         
         if result.inserted_id:
