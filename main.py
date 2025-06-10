@@ -1346,10 +1346,10 @@ async def select_best_tcgplayer_variant(
             
             # Prefer variants that have both card number and card name matches, but don't completely reject others
             if not card_number_found:
-                score -= 150  # Significant penalty for missing card number
+                score -= 75   # Moderate penalty for missing card number (reduced from 150)
                 logger.warning(f"⚠ Card number not found - applying penalty")
             if not card_name_perfect_match:
-                score -= 100  # Moderate penalty for imperfect card name match 
+                score -= 50   # Small penalty for imperfect card name match (reduced from 100)
                 logger.warning(f"⚠ Card name not perfectly matched - applying penalty")
             
             # Verify this variant against our expected card info from MongoDB cache
