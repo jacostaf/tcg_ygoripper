@@ -706,10 +706,22 @@ def _check_freshness_and_return(document) -> tuple[bool, Optional[Dict]]:
         # At this point both dates should be timezone-aware (UTC)
         is_fresh = last_update > expiry_date
         
-        if is_fresh:
-            logger.info(f"  ✅ Found FRESH cached data (updated: {last_update})")
+        # Check if the cached data has actual price information
+        has_price_data = bool(
+            document.get('tcg_price') is not None or 
+            document.get('tcg_market_price') is not None or 
+            document.get('pc_ungraded_price') is not None
+        )
+        
+        if is_fresh and has_price_data:
+            logger.info(f"  ✅ Found FRESH cached data with pricing (updated: {last_update})")
+        elif is_fresh and not has_price_data:
+            logger.info(f"  ⚠️  Found FRESH cached data but NO PRICING DATA (updated: {last_update}) - treating as stale")
+            is_fresh = False  # Treat as stale if no pricing data
+        elif not is_fresh and has_price_data:
+            logger.info(f"  ⚠️  Found STALE cached data with pricing (updated: {last_update}, expired: {expiry_date})")
         else:
-            logger.info(f"  ⚠️  Found STALE cached data (updated: {last_update}, expired: {expiry_date})")
+            logger.info(f"  ❌ Found STALE cached data with NO PRICING DATA (updated: {last_update}, expired: {expiry_date})")
         
         # Format the date as RFC string for JSON serialization
         document['last_price_updt'] = last_update.strftime("%a, %d %b %Y %H:%M:%S GMT")
@@ -804,27 +816,28 @@ def save_price_data_sync(price_data: Dict) -> bool:
         # Update timestamp
         price_data['last_price_updt'] = datetime.now(UTC)
         
-        # Build query for upsert - prioritize card_number if available
+        # Build query that matches the cache lookup logic exactly
         query = {}
+        
+        # Use card_number as primary identifier if available
         if price_data.get("card_number") and price_data["card_number"] != "Unknown":
             query["card_number"] = price_data["card_number"]
         elif price_data.get("card_name"):
-            query["card_name"] = price_data["card_name"]
+            # For card_name, we need to consider that cache lookup uses regex
+            # but for save we want exact match to avoid duplicates
+            query["card_name"] = price_data["card_name"].strip()
         
-        # Only add non-empty fields to the query
-        card_name = price_data.get("card_name")
-        if card_name and card_name.strip():
-            query["card_name"] = card_name.strip()
-        
+        # Add rarity to query (using exact match for save, consistent with lookup intent)
         card_rarity = price_data.get("card_rarity")
         if card_rarity and card_rarity.strip():
             query["card_rarity"] = card_rarity.strip()
         
+        # Add art variant to query if provided
         card_art_variant = price_data.get("card_art_variant")
         if card_art_variant and card_art_variant.strip():
             query["card_art_variant"] = card_art_variant.strip()
         
-        logger.info(f"Saving price data with sync query: {query}")
+        logger.info(f"Saving price data with query: {query}")
         
         # Clean the price_data before saving - remove empty strings
         cleaned_data = {}
@@ -842,6 +855,7 @@ def save_price_data_sync(price_data: Dict) -> bool:
             logger.error("card_rarity missing from cleaned data")
             return False
         
+        # Use replace_one to ensure we replace existing records completely
         result = sync_price_scraping_collection.replace_one(
             query,
             cleaned_data,
