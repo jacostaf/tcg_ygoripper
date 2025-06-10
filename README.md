@@ -6,7 +6,7 @@ A comprehensive Flask API for fetching, caching, and managing Yu-Gi-Oh! card dat
 
 - **Card Sets Management**: Fetch and cache all Yu-Gi-Oh! card sets
 - **Card Variants Database**: Create unique entries for each card variant (different rarities, sets, and artworks)
-- **Price Scraping**: Automated price collection from PriceCharting.com with intelligent variant selection
+- **Price Scraping**: Automated price collection from TCGPlayer.com with intelligent variant selection
 - **MongoDB Integration**: Efficient caching and storage of card data and pricing information
 - **Rate Limiting Compliance**: Respects YGOPRODeck API rate limits (20 requests/second)
 - **Comprehensive API**: Multiple endpoints for different data access patterns
@@ -28,7 +28,7 @@ A comprehensive Flask API for fetching, caching, and managing Yu-Gi-Oh! card dat
 - `GET /cards/variants` - Get card variants with pagination
 
 ### Price Data
-- `POST /cards/price` - Scrape price data for a specific card from PriceCharting.com
+- `POST /cards/price` - Scrape price data for a specific card from TCGPlayer.com
 - `GET /cards/price/cache-stats` - Get statistics about the price cache collection
 
 ## Setup
@@ -85,9 +85,7 @@ The API will be available at `http://localhost:5001`
   - Advanced scoring algorithm for precise variant identification
 
 ### Price Data Collection
-- **TCGPlayer Prices**: Market prices from TCGPlayer
-- **Graded Card Prices**: Multiple PSA grade levels (7, 8, 9, 9.5, 10)
-- **Ungraded Prices**: Raw card market values
+- **TCGPlayer Prices**: Direct market prices from TCGPlayer including both regular and market prices
 - **Smart Caching**: 7-day cache expiry with force refresh option
 
 ### Supported Card Features
@@ -103,10 +101,11 @@ The API will be available at `http://localhost:5001`
 curl -X POST http://localhost:8080/cards/price \
   -H "Content-Type: application/json" \
   -d '{
-    "card_number": "BLTR-EN051",
-    "card_name": "Blue-Eyes White Dragon",
-    "card_rarity": "Quarter Century Secret Rare",
-    "art_variant": "7th"
+    "card_number": "RA04-EN016",
+    "card_name": "Black Metal Dragon",
+    "card_rarity": "Secret Rare",
+    "art_variant": "",
+    "force_refresh": "true"
   }'
 ```
 
@@ -119,13 +118,13 @@ curl http://localhost:8080/cards/price/cache-stats
 
 This project uses:
 - [YGOPRODeck API](https://ygoprodeck.com/api-guide/) for all Yu-Gi-Oh! card data
-- [PriceCharting.com](https://www.pricecharting.com/) for market price data and graded card values
+- [TCGPlayer.com](https://www.tcgplayer.com/) for market price data and card pricing information
 
 ## Rate Limiting
 
 The application includes built-in rate limiting to comply with:
 - YGOPRODeck API limits (20 requests per second with 100ms delays between requests)
-- PriceCharting.com scraping with respectful delays and browser automation
+- TCGPlayer.com scraping with respectful delays and browser automation
 
 ## License
 
