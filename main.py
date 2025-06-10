@@ -580,13 +580,66 @@ def find_cached_price_data_sync(
         
         # Build query based on art variant
         if art_variant and art_variant.strip():
-            # Use exact match for art variant to ensure we get the right cached entry
-            # This prevents returning cached data for a different art variant
+            art_variant_clean = art_variant.strip()
+            
+            # Try exact match first
             query = {
                 **base_query,
-                "card_art_variant": art_variant.strip()
+                "card_art_variant": art_variant_clean
             }
-            logger.info(f"  🎨 Using exact art variant match: '{art_variant.strip()}'")
+            logger.info(f"  🎨 Trying exact art variant match: '{art_variant_clean}'")
+            
+            # Check if we get results with exact match
+            test_docs = list(sync_price_scraping_collection.find(query, {"_id": 1}).limit(1))
+            
+            if not test_docs:
+                # No exact match, try pattern matching
+                # Generate possible art variant patterns the cache might contain
+                art_patterns = []
+                
+                # If requesting a number like "7", try "7th", "7th Art", etc.
+                if art_variant_clean.isdigit():
+                    num = art_variant_clean
+                    ordinals = ["st", "nd", "rd", "th"]
+                    suffix = "th"
+                    if num.endswith("1") and not num.endswith("11"):
+                        suffix = "st"
+                    elif num.endswith("2") and not num.endswith("12"):
+                        suffix = "nd"
+                    elif num.endswith("3") and not num.endswith("13"):
+                        suffix = "rd"
+                    
+                    art_patterns.extend([
+                        f"{num}{suffix}",
+                        f"{num}{suffix} Art",
+                        f"{num}{suffix} art"
+                    ])
+                
+                # Also try the pattern without any suffix (reverse case)
+                if not art_variant_clean.isdigit():
+                    # Extract just the number if pattern like "7th Art" -> "7"
+                    import re
+                    number_match = re.match(r'^(\d+)', art_variant_clean)
+                    if number_match:
+                        art_patterns.append(number_match.group(1))
+                
+                logger.info(f"  🎨 No exact match found, trying art variant patterns: {art_patterns}")
+                
+                # Try each pattern
+                for pattern in art_patterns:
+                    pattern_query = {
+                        **base_query,
+                        "card_art_variant": pattern
+                    }
+                    test_docs = list(sync_price_scraping_collection.find(pattern_query, {"_id": 1}).limit(1))
+                    if test_docs:
+                        query = pattern_query
+                        logger.info(f"  🎨 ✓ Found match with pattern: '{pattern}'")
+                        break
+                else:
+                    logger.info(f"  🎨 ⚠️ No pattern matches found, using exact query anyway")
+            else:
+                logger.info(f"  🎨 ✓ Exact art variant match found")
         else:
             query = base_query
             logger.info(f"  🎨 No art variant filter applied")
