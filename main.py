@@ -2826,7 +2826,16 @@ def scrape_card_price():
                 "error": "Either card_number or card_name is required"
             }), 400
         card_rarity = data.get('card_rarity', '').strip() if data.get('card_rarity') else None
-        art_variant = data.get('art_variant', '').strip() if data.get('art_variant') else None
+        # Handle art_variant parameter carefully to distinguish between missing and empty string
+        if 'art_variant' in data:
+            # If art_variant key is present in JSON
+            if data['art_variant'] is None:
+                art_variant = None  # Explicit None in JSON
+            else:
+                art_variant = data['art_variant'].strip() if data['art_variant'] else ''
+        else:
+            # If art_variant key is not present in JSON
+            art_variant = None
         
         # Convert force_refresh to boolean properly
         force_refresh = str(data.get('force_refresh', '')).lower() == 'true'
