@@ -1040,47 +1040,62 @@ def extract_set_code(card_number: str) -> Optional[str]:
     return None
 
 def map_set_code_to_tcgplayer_name(set_code: str) -> Optional[str]:
-    """Map YGO set code to TCGPlayer set name for filtering."""
+    """Map YGO set code to TCGPlayer set name using MongoDB cache."""
     if not set_code:
         return None
     
-    # Known mappings from set codes to TCGPlayer set names
-    # These are the exact names as they appear in TCGPlayer's filter dropdowns
-    set_code_mappings = {
-        'RA04': 'Quarter Century Stampede',  # RA04 is Quarter Century Stampede
-        'RA03': 'Quarter Century Bonanza',   # RA03 is Quarter Century Bonanza
-        'SUDA': 'Speed Duel Decks: Destiny Masters',
-        'SBCB': 'Speed Duel: Battle City Box',
-        'LEDD': 'Legendary Dragon Decks',
-        'DUSA': 'Duelist Saga',
-        'DUPO': 'Duel Power',
-        'MVP1': 'The Dark Side of Dimensions Movie Pack: Secret Edition',
-        'MGED': 'Maximum Gold: El Dorado',
-        'MAGO': 'Maximum Gold',
-        'CT13': '2016 Mega-Tins',
-        'CT14': '2017 Mega-Tins',
-        'LC01': 'Legendary Collection 1',
-        'LDK2': 'Legendary Decks II',
-        'SDY': 'Starter Deck: Yugi',
-        'SYE': 'Starter Deck: Yugi Evolution',
-        'SD6': 'Structure Deck: Spellcaster\'s Judgment',
-        'STAX': '2-Player Starter Set',
-        'LOB': 'The Legend of Blue Eyes White Dragon',
-        'BPT': '2002 Collectors Tin',
-        'DB1': 'Dark Beginning 1',
-        'JUMP': 'Shonen Jump Magazine Promos',
-        'DPBC': 'Duelist Pack: Battle City',
-        'SBC2': 'Speed Duel: Battle City Finals',
-        'SS01': 'Speed Duel Decks: Destiny Masters'
-    }
-    
-    tcgplayer_set_name = set_code_mappings.get(set_code.upper())
-    if tcgplayer_set_name:
-        logger.debug(f"Mapped set code {set_code} to TCGPlayer set name: {tcgplayer_set_name}")
-        return tcgplayer_set_name
-    
-    logger.debug(f"No TCGPlayer set name mapping found for set code: {set_code}")
-    return None
+    try:
+        # Initialize sync MongoDB connection if needed
+        if sync_price_scraping_client is None:
+            initialize_sync_price_scraping()
+        
+        # Get the sets collection
+        db = sync_price_scraping_client.get_default_database()
+        sets_collection = db["YGO_SETS_CACHE_V1"]
+        
+        # Search for the set by code (case-insensitive)
+        set_document = sets_collection.find_one(
+            {"set_code": {"$regex": f"^{re.escape(set_code)}$", "$options": "i"}},
+            {"set_name": 1, "_id": 0}
+        )
+        
+        if set_document and 'set_name' in set_document:
+            set_name = set_document['set_name']
+            logger.debug(f"Mapped set code {set_code} to TCGPlayer set name: {set_name}")
+            return set_name
+        else:
+            logger.debug(f"No TCGPlayer set name mapping found in MongoDB for set code: {set_code}")
+            
+            # Fallback to hardcoded mappings for critical sets if MongoDB lookup fails
+            fallback_mappings = {
+                'RA04': 'Quarter Century Stampede',
+                'RA03': 'Quarter Century Bonanza',
+                'SUDA': 'Supreme Darkness'  # Fixed mapping
+            }
+            
+            fallback_name = fallback_mappings.get(set_code.upper())
+            if fallback_name:
+                logger.debug(f"Using fallback mapping for {set_code}: {fallback_name}")
+                return fallback_name
+            
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error looking up set name for code '{set_code}': {e}")
+        
+        # Fallback to hardcoded mappings if MongoDB fails
+        fallback_mappings = {
+            'RA04': 'Quarter Century Stampede',
+            'RA03': 'Quarter Century Bonanza', 
+            'SUDA': 'Supreme Darkness'  # Fixed mapping
+        }
+        
+        fallback_name = fallback_mappings.get(set_code.upper())
+        if fallback_name:
+            logger.debug(f"Using fallback mapping for {set_code}: {fallback_name}")
+            return fallback_name
+        
+        return None
 
 def map_rarity_to_tcgplayer_filter(rarity: str) -> Optional[str]:
     """Map YGO rarity to TCGPlayer rarity filter value."""
@@ -1527,12 +1542,41 @@ async def select_best_tcgplayer_variant(
                 
                 score += rarity_score
             
-            # Score for art variant match
+            # Score for art variant match - improved precision
             if target_art_version:
-                art_version = str(target_art_version).strip().lower()
-                if art_version in title_lower:
-                    score += 25
-                    logger.info(f"✓ Art variant match for '{target_art_version}'")
+                art_version_score = 0
+                target_art = str(target_art_version).strip().lower()
+                
+                # Extract art variant from this variant's title and URL
+                variant_art = extract_art_version(variant['title'])
+                if not variant_art:
+                    variant_art = extract_art_version(variant['href'])
+                
+                if variant_art:
+                    variant_art_normalized = str(variant_art).strip().lower()
+                    # Remove ordinal suffixes for comparison
+                    target_art_clean = re.sub(r'(st|nd|rd|th)$', '', target_art)
+                    variant_art_clean = re.sub(r'(st|nd|rd|th)$', '', variant_art_normalized)
+                    
+                    if target_art_clean == variant_art_clean:
+                        # Exact art variant match - high score
+                        art_version_score = 100
+                        logger.info(f"✓ EXACT art variant match: '{target_art_version}' == '{variant_art}'")
+                    else:
+                        # Art variant mismatch - penalty
+                        art_version_score = -50
+                        logger.warning(f"✗ Art variant mismatch: '{target_art_version}' != '{variant_art}'")
+                else:
+                    # No art variant found in title - check for basic presence in text
+                    if target_art in title_lower or target_art in url_lower:
+                        art_version_score = 25
+                        logger.info(f"⚠ Weak art variant match for '{target_art_version}' found in text")
+                    else:
+                        # No art variant info available - small penalty
+                        art_version_score = -10
+                        logger.info(f"⚠ No art variant info found for comparison")
+                
+                score += art_version_score
                     
             # Small bonus for detailed titles (but not a major factor)
             score += min(len(variant['title']) // 20, 5)
@@ -2480,11 +2524,14 @@ async def scrape_price_from_tcgplayer(
                 }
             """)
             
-            # Extract the ACTUAL art variant from the cleaned title
-            actual_art_variant = extract_art_version(page_title)
-            if not actual_art_variant:
-                # Also try extracting from URL
-                actual_art_variant = extract_art_version(final_url)
+            # Extract the ACTUAL art variant from the cleaned title only if art_variant was requested
+            actual_art_variant = None
+            if art_variant and len(art_variant.strip()) > 0:
+                # Only extract art variant if one was specifically requested
+                actual_art_variant = extract_art_version(page_title)
+                if not actual_art_variant:
+                    # Also try extracting from URL
+                    actual_art_variant = extract_art_version(final_url)
             
             # Extract and validate rarity directly from TCGPlayer page
             detected_rarity = None
@@ -2512,9 +2559,16 @@ async def scrape_price_from_tcgplayer(
             # If we still don't have a rarity, use the requested one
             final_rarity = detected_rarity if detected_rarity else card_rarity
             
-            # For art variant, use detected one from TCGPlayer if available,
-            # otherwise use what we extracted from title or URL, or fall back to provided one
-            final_art_variant = detected_art if detected_art else (actual_art_variant if actual_art_variant else art_variant)
+            # For art variant processing:
+            # 1. If art_variant was provided in payload, use detected/extracted art or fall back to provided
+            # 2. If no art_variant was provided, use None (skip art variant processing)
+            final_art_variant = None
+            if art_variant and len(art_variant.strip()) > 0:
+                # Use detected art from TCGPlayer first, then extracted from title/URL, then provided
+                final_art_variant = detected_art if detected_art else (actual_art_variant if actual_art_variant else art_variant)
+                logger.info(f"Art variant processing: requested='{art_variant}', detected='{detected_art}', extracted='{actual_art_variant}', final='{final_art_variant}'")
+            else:
+                logger.info("No art variant requested - skipping art variant processing")
             
             # Extract prices from the TCGPlayer product page
             price_data = await extract_prices_from_tcgplayer_dom(page)
