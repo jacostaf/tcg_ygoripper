@@ -603,9 +603,10 @@ def find_cached_price_data_sync(
         elif card_name:
             base_query["card_name"] = {"$regex": re.escape(card_name), "$options": "i"}
             
-        # Add rarity filter if provided
+        # Add rarity filter if provided - use exact normalized matching to prevent conflicts
         if card_rarity:
-            base_query["card_rarity"] = {"$regex": re.escape(card_rarity), "$options": "i"}
+            normalized_target_rarity = normalize_rarity(card_rarity)
+            base_query["card_rarity"] = normalized_target_rarity
         
         # Build query based on art variant parameter
         if art_variant is not None:
@@ -833,10 +834,11 @@ def save_price_data_sync(price_data: Dict, requested_art_variant: Optional[str] 
         elif price_data.get("card_name"):
             deletion_query["card_name"] = {"$regex": re.escape(price_data["card_name"]), "$options": "i"}
         
-        # Add rarity to deletion query using regex
+        # Add rarity to deletion query using exact normalized matching to prevent conflicts
         card_rarity = price_data.get("card_rarity")
         if card_rarity and card_rarity.strip():
-            deletion_query["card_rarity"] = {"$regex": re.escape(card_rarity.strip()), "$options": "i"}
+            normalized_rarity = normalize_rarity(card_rarity.strip())
+            deletion_query["card_rarity"] = normalized_rarity
         
         # Add art variant to deletion query to prevent deleting different art variants
         # This is crucial for allowing multiple art variants of the same card+rarity to coexist
@@ -902,6 +904,14 @@ def save_price_data_sync(price_data: Dict, requested_art_variant: Optional[str] 
             logger.error("card_rarity missing from cleaned data")
             return False
         
+        # Normalize the card_rarity before saving to ensure consistent cache operations
+        original_rarity = cleaned_data["card_rarity"]
+        normalized_rarity = normalize_rarity(original_rarity)
+        cleaned_data["card_rarity"] = normalized_rarity
+        if original_rarity != normalized_rarity:
+            logger.info(f"🔧 Normalized card rarity: '{original_rarity}' -> '{normalized_rarity}'")
+        
+        
         # Insert the new record (we deleted matching ones above, so this will always be an insert)
         logger.info(f"💾 About to save record with the following key fields:")
         logger.info(f"  💾 card_number: '{cleaned_data.get('card_number')}'")
@@ -923,7 +933,8 @@ def save_price_data_sync(price_data: Dict, requested_art_variant: Optional[str] 
                 verification_query["card_name"] = {"$regex": re.escape(cleaned_data["card_name"]), "$options": "i"}
                 
             if cleaned_data.get("card_rarity"):
-                verification_query["card_rarity"] = {"$regex": re.escape(cleaned_data["card_rarity"]), "$options": "i"}
+                normalized_verification_rarity = normalize_rarity(cleaned_data["card_rarity"])
+                verification_query["card_rarity"] = normalized_verification_rarity
                 
             # Use exact same logic as cache lookup for art variant
             if cleaned_data.get("card_art_variant"):
