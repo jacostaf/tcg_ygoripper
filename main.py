@@ -13,11 +13,18 @@ import time
 import re
 import asyncio
 import ssl
+from flask_cors import CORS
 
 # Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
+
+# Enable CORS for all routes and origins
+# This allows the frontend (localhost:8080) to make requests to the backend (localhost:8081)
+CORS(app, origins=["http://localhost:8080", "http://127.0.0.1:8080"], 
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+     allow_headers=["Content-Type", "Authorization"])
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
