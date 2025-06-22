@@ -22,7 +22,7 @@ app = Flask(__name__)
 
 # Enable CORS for all routes and origins
 # This allows the frontend (localhost:8080) to make requests to the backend (localhost:8081)
-CORS(app, origins=["http://localhost:8080", "http://127.0.0.1:8080"], 
+CORS(app, origins=["http://localhost:8080","http://localhost:8082","http://localhost:8087","http://localhost:8084","http://localhost:8083", "http://127.0.0.1:8080","*"], 
      methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
      allow_headers=["Content-Type", "Authorization"])
 
@@ -3879,6 +3879,60 @@ def get_cards_from_specific_set(set_name):
             "set_name": set_name,
             "error": "Internal server error"
         }), 500
+
+
+
+@app.route('/cards/image', methods=['GET'])
+def proxy_card_image():
+    """Proxy card images from YGOPRODeck API to avoid CORS issues"""
+    try:
+        image_url = request.args.get('url')
+        
+        if not image_url:
+            return jsonify({
+                "success": False,
+                "error": "image URL parameter is required"
+            }), 400
+        
+        # Validate that it's a YGOPRODeck image URL for security
+        if not image_url.startswith('https://images.ygoprodeck.com/'):
+            return jsonify({
+                "success": False,
+                "error": "Only YGOPRODeck image URLs are allowed"
+            }), 400
+        
+        # Fetch the image from YGOPRODeck
+        response = requests.get(image_url, timeout=10)
+        
+        if response.status_code == 200:
+            # Return the image with proper headers
+            from flask import Response
+            return Response(
+                response.content,
+                mimetype=response.headers.get('content-type', 'image/jpeg'),
+                headers={
+                    'Access-Control-Allow-Origin': '*',
+                    'Cache-Control': 'public, max-age=86400'  # Cache for 24 hours
+                }
+            )
+        else:
+            return jsonify({
+                "success": False,
+                "error": f"Failed to fetch image: HTTP {response.status_code}"
+            }), response.status_code
+            
+    except requests.exceptions.Timeout:
+        return jsonify({
+            "success": False,
+            "error": "Image request timeout"
+        }), 504
+    except Exception as e:
+        logger.error(f"Error proxying image: {e}")
+        return jsonify({
+            "success": False,
+            "error": "Internal server error"
+        }), 500
+
 
 @app.route('/card-sets/fetch-all-cards', methods=['POST'])
 def fetch_all_cards_from_sets():
