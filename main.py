@@ -1,9 +1,12 @@
 from flask import Flask, jsonify, request
 from dotenv import load_dotenv
 from pymongo import MongoClient
-from datetime import datetime, timedelta, UTC
-from urllib.parse import quote, urlencode
-from typing import Optional, Dict, List, Any
+from datetime import datetime, timezone, timedelta
+
+# Define UTC timezone for consistent timezone handling
+UTC = timezone.utc
+from urllib.parse import quote, quote_plus, urlencode
+from typing import Optional, Dict, List, Any, Union
 from pydantic import BaseModel, Field
 from bson import ObjectId
 import requests
@@ -13,6 +16,7 @@ import time
 import re
 import asyncio
 import ssl
+import json
 from flask_cors import CORS
 
 # Load environment variables
@@ -66,22 +70,7 @@ def get_mongo_client():
         return client
     except Exception as e:
         logger.error(f"Failed to connect to MongoDB: {str(e)}")
-        # Try a fallback connection approach with minimal SSL settings
-        try:
-            logger.info("Attempting fallback connection approach...")
-            client = MongoClient(
-                MONGODB_CONNECTION_STRING,
-                tls=True,
-                tlsAllowInvalidCertificates=True,
-                serverSelectionTimeoutMS=60000,
-                retryWrites=True
-            )
-            client.admin.command('ping')
-            logger.info("Successfully connected to MongoDB with fallback settings")
-            return client
-        except Exception as fallback_e:
-            logger.error(f"Fallback connection also failed: {str(fallback_e)}")
-            return None
+        return None
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -277,7 +266,7 @@ def normalize_rarity(rarity: str) -> str:
     # Special handling for Ghost variants
     if 'ghost' in normalized:
         if 'gold' in normalized:
-            return 'ghost/gold rare'
+            return 'ghost gold rare'
         return 'ghost rare'
     
     # Special handling for Parallel variants
@@ -844,7 +833,7 @@ def save_price_data_sync(price_data: Dict, requested_art_variant: Optional[str] 
         # Add rarity to deletion query using exact normalized matching to prevent conflicts
         card_rarity = price_data.get("card_rarity")
         if card_rarity and card_rarity.strip():
-            normalized_rarity = normalize_rarity(card_rarity.strip())
+            normalized_rarity = normalize_rarity(card_rarity)
             deletion_query["card_rarity"] = normalized_rarity
         
         # Add art variant to deletion query to prevent deleting different art variants
@@ -1385,642 +1374,223 @@ def extract_booster_set_name(source_url: str) -> Optional[str]:
         logger.error(f"Error extracting booster set name from URL {source_url}: {e}")
         return None
 
-async def select_best_tcgplayer_variant(
-    page, 
-    card_number: str, 
-    card_name: Optional[str], 
-    card_rarity: Optional[str], 
-    target_art_version: Optional[str],
-    expected_card_info: Optional[Dict] = None,
-    max_variants_to_process: int = None
-) -> Optional[str]:
-    """Select best card variant from TCGPlayer search results.
-    
-    Args:
-        max_variants_to_process: Maximum number of variants to evaluate. 
-                                If None, uses TCGPLAYER_DEFAULT_VARIANT_LIMIT (default 100)
-                                to prevent performance issues with large result sets
+@app.route('/cards/price/custom', methods=['POST'])
+def scrape_custom_card_price():
+    """Scrape price data for a card from *brand-new* sets that are **not yet cached**.
+
+    The standard `/cards/price` endpoint depends on cached set / variant mappings that
+    may not exist for freshly released sets.  This endpoint therefore:
+
+    1. Accepts the *display name* of the set (as it appears on TCGPlayer) **or** the
+       four-letter set code via `set_name_or_code`.
+    2. Drives the TCGPlayer UI with Playwright – opening the *Set* filter panel and
+       programmatically checking the matching set check-box so that only variants from
+       the target set are returned.
+    3. Reuses the existing helpers (`extract_prices_from_tcgplayer_dom`, etc.) to
+       build the final price record.
+
+    Request JSON schema (all strings):
+        card_name           – required – Full English card name.
+        set_name_or_code    – required – TCGPlayer set title **or** 4-letter code.
+        rarity              – required – Desired rarity (e.g. "Secret Rare").
+        card_number         – optional – PHNI-EN001 … Used only for the response.
+        art_variant         – optional – "1st", "Alternate Art", etc.
+        force_refresh       – optional – Bypass cache when truthy.
     """
-    if max_variants_to_process is None:
-        max_variants_to_process = TCGPLAYER_DEFAULT_VARIANT_LIMIT
-    try:
-        logger.info("="*80)
-        logger.info("STARTING TCGPLAYER VARIANT SELECTION")
-        logger.info(f"Target Card Number: {card_number}")
-        logger.info(f"Target Rarity: {card_rarity}")
-        logger.info(f"Target Art Version: {target_art_version}")
-        logger.info("="*80)
-        
-        # Extract product links from TCGPlayer search results with limiting
-        max_variants = max_variants_to_process
-        variants = await page.evaluate("""
-            (maxVariants) => {
-                const variants = [];
-                
-                // TCGPlayer search results - look for product links directly
-                const productLinks = Array.from(document.querySelectorAll('a[href*="/product/"]'));
-                
-                // Log total found and apply limiting
-                console.log('Found ' + productLinks.length + ' total product links');
-                const linksToProcess = productLinks.slice(0, maxVariants);
-                console.log('Processing first ' + linksToProcess.length + ' variants (limit: ' + maxVariants + ')');
-                
-                linksToProcess.forEach(link => {
-                    const href = link.getAttribute('href');
-                    
-                    // Extract comprehensive product information from the link
-                    let cardName = '';
-                    let setName = '';
-                    let rarity = '';
-                    let cardNumber = '';
-                    
-                    // Method 1: Extract from structured elements within the link
-                    const heading = link.querySelector('h4');  // Set name is in h4
-                    if (heading) {
-                        setName = heading.textContent ? heading.textContent.trim() : '';
-                    }
-                    
-                    // Find generic elements that contain the card information
-                    const generics = link.querySelectorAll('generic');
-                    generics.forEach(generic => {
-                        const text = generic.textContent ? generic.textContent.trim() : '';
-                        
-                        // Look for card number (starts with #)
-                        if (text.startsWith('#')) {
-                            cardNumber = text.replace('#', '').trim();
-                        }
-                        // Enhanced rarity detection - look for complete rarity phrases
-                        else if (text.match(/quarter\\s+century\\s+secret\\s+rare/i)) {
-                            rarity = 'Quarter Century Secret Rare';
-                        }
-                        else if (text.match(/platinum\\s+secret\\s+rare/i)) {
-                            rarity = 'Platinum Secret Rare';
-                        }
-                        else if (text.match(/collector'?s\\s+rare/i)) {
-                            rarity = "Collector's Rare";
-                        }
-                        else if (text.match(/starlight\\s+rare/i)) {
-                            rarity = 'Starlight Rare';
-                        }
-                        else if (text.match(/secret\\s+rare/i)) {
-                            rarity = 'Secret Rare';
-                        }
-                        else if (text.match(/ultra\\s+rare/i)) {
-                            rarity = 'Ultra Rare';
-                        }
-                        else if (text.match(/super\\s+rare/i)) {
-                            rarity = 'Super Rare';
-                        }
-                        else if (text.match(/\\bcommon\\b/i)) {
-                            rarity = 'Common';
-                        }
-                        else if (text.match(/\\brare\\b/i) && !text.includes('$') && !text.includes('listings')) {
-                            rarity = 'Rare';
-                        }
-                        // Look for card name (longer text, contains letters, not price/listing info)
-                        else if (text.length > 3 && /[a-zA-Z]/.test(text) && 
-                                !text.includes('listings') && !text.includes('$') && 
-                                !text.includes('Market Price:') && !text.includes('from') &&
-                                !text.startsWith('#') && text !== setName && !rarity) {
-                            // This could be the card name - take the longest meaningful one
-                            if (text.length > cardName.length) {
-                                cardName = text;
-                            }
-                        }
-                    });
-                    
-                    // Fallback: if no rarity found in generic elements, check other page elements
-                    if (!rarity) {
-                        // Check all text content in the link for rarity information
-                        const allText = link.textContent || '';
-                        
-                        if (allText.match(/quarter\\s+century\\s+secret\\s+rare/i)) {
-                            rarity = 'Quarter Century Secret Rare';
-                        } else if (allText.match(/platinum\\s+secret\\s+rare/i)) {
-                            rarity = 'Platinum Secret Rare';
-                        } else if (allText.match(/collector'?s\\s+rare/i)) {
-                            rarity = "Collector's Rare";
-                        } else if (allText.match(/starlight\\s+rare/i)) {
-                            rarity = 'Starlight Rare';
-                        } else if (allText.match(/secret\\s+rare/i)) {
-                            rarity = 'Secret Rare';
-                        } else if (allText.match(/ultra\\s+rare/i)) {
-                            rarity = 'Ultra Rare';
-                        } else if (allText.match(/super\\s+rare/i)) {
-                            rarity = 'Super Rare';
-                        } else if (allText.match(/\\bcommon\\b/i)) {
-                            rarity = 'Common';
-                        }
-                    }
-                    
-                    // Build comprehensive title from extracted components
-                    let title = '';
-                    if (cardName) {
-                        title = cardName;
-                        if (setName) {
-                            title += ' - ' + setName;
-                        }
-                        if (rarity) {
-                            title += ' (' + rarity + ')';
-                        }
-                        if (cardNumber) {
-                            title += ' [' + cardNumber + ']';
-                        }
-                    } else {
-                        // Fallback: use all text content and clean it up
-                        const allText = link.textContent ? link.textContent.trim() : '';
-                        // Take first meaningful part before price info
-                        const parts = allText.split(/Market Price:|listings from|\\$/);
-                        title = parts[0] ? parts[0].trim() : '';
-                    }
-                    
-                    if (href && title) {
-                        // Make sure href is absolute
-                        const fullHref = href.startsWith('http') ? href : 'https://www.tcgplayer.com' + href;
-                        
-                        variants.push({
-                            title: title,
-                            href: fullHref,
-                            cardName: cardName,
-                            setName: setName,
-                            rarity: rarity,
-                            cardNumber: cardNumber
-                        });
-                    }
-                });
-                
-                return variants;
-            }
-        """, max_variants)
 
-        if not variants:
-            logger.warning("No variants found in TCGPlayer search results")
-            # Log page content for debugging
-            page_content = await page.evaluate("() => document.body.textContent || ''")
-            if "0 results for:" in page_content:
-                logger.warning("TCGPlayer returned 0 results - page shows no matching products")
-            elif "No results for" in page_content:
-                logger.warning("TCGPlayer 'No results' message detected")
-            else:
-                logger.warning("Unknown issue with TCGPlayer search results extraction")
-            return None
-            
-        logger.info(f"Found {len(variants)} variants to check - will process ALL variants (no early termination)")
-        
-        # Log if we hit the processing limit
-        total_available = await page.evaluate("() => document.querySelectorAll('a[href*=\"/product/\"]').length")
-        if total_available > max_variants_to_process:
-            logger.warning(f"Large result set detected: {total_available} total variants found, processing first {max_variants_to_process} (limit)")
-            logger.info(f"Processing limit applied to prevent excessive processing time. All {max_variants_to_process} variants will still be evaluated.")
-        
-        # Score variants based on card number, rarity, card name, and art variant matches
-        # Process ALL variants to ensure we don't miss the correct card
-        scored_variants = []
-        
-        for i, variant in enumerate(variants):
-            score = 0
-            title_lower = variant['title'].lower()
-            url_lower = variant['href'].lower()
-            
-            # Extract structured data
-            variant_card_name = variant.get('cardName', '').lower()
-            variant_card_number = variant.get('cardNumber', '').lower()
-            variant_rarity = variant.get('rarity', '').lower()
-            variant_set_name = variant.get('setName', '').lower()
-            
-            logger.info(f"Evaluating variant {i+1}/{len(variants)}: {variant['title'][:80]}...")
-            logger.info(f"  Card Name: '{variant.get('cardName', 'N/A')}'")
-            logger.info(f"  Card Number: '{variant.get('cardNumber', 'N/A')}'")
-            logger.info(f"  Rarity: '{variant.get('rarity', 'N/A')}'")
-            logger.info(f"  Set: '{variant.get('setName', 'N/A')}'")
-            
-            # CRITICAL: Card number exact match
-            card_number_found = False
-            if card_number:
-                card_number_lower = card_number.lower()
-                # Check extracted card number first, then fallback to title/URL
-                if variant_card_number == card_number_lower:
-                    card_number_found = True
-                    score += 300  # Highest score for exact card number match
-                    logger.info(f"✓ EXACT card number match: {card_number}")
-                elif card_number_lower in title_lower or card_number_lower in url_lower:
-                    card_number_found = True
-                    score += 200  # High score for card number in title/URL
-                    logger.info(f"✓ Card number {card_number} found in title/URL")
-                else:
-                    # Heavily penalize variants without the target card number
-                    score -= 200
-                    logger.warning(f"✗ Card number {card_number} NOT found")
-                    
-            # CRITICAL: Card name verification
-            card_name_perfect_match = False
-            if card_name:
-                expected_name = card_name.lower()
-                # Check extracted card name first
-                if variant_card_name and expected_name == variant_card_name:
-                    card_name_perfect_match = True
-                    score += 250  # Very high score for exact card name match
-                    logger.info(f"✓ EXACT card name match: '{card_name}'")
-                elif variant_card_name:
-                    # Check if all words of expected name are in extracted name
-                    name_words = expected_name.split()
-                    name_match_count = sum(1 for word in name_words if word in variant_card_name)
-                    if name_match_count == len(name_words):
-                        card_name_perfect_match = True
-                        score += 200  # High score for all words matching
-                        logger.info(f"✓ All words match in card name: '{card_name}'")
-                    elif name_match_count > 0:
-                        score += (name_match_count / len(name_words)) * 100
-                        logger.info(f"⚠ Partial card name match ({name_match_count}/{len(name_words)})")
-                    else:
-                        score -= 100
-                        logger.warning(f"✗ No card name match in extracted data")
-                else:
-                    # Fallback to checking title
-                    name_words = expected_name.split()
-                    name_match_count = sum(1 for word in name_words if word in title_lower)
-                    if name_match_count == len(name_words):
-                        card_name_perfect_match = True
-                        score += 150  # Good score for title match
-                        logger.info(f"✓ Card name words found in title")
-                    else:
-                        score -= 50
-                        logger.warning(f"✗ Incomplete card name match in title")
-            
-            # Prefer variants that have both card number and card name matches, but don't completely reject others
-            if not card_number_found:
-                score -= 75   # Moderate penalty for missing card number (reduced from 150)
-                logger.warning(f"⚠ Card number not found - applying penalty")
-            if not card_name_perfect_match:
-                score -= 50   # Small penalty for imperfect card name match (reduced from 100)
-                logger.warning(f"⚠ Card name not perfectly matched - applying penalty")
-            
-            # Verify this variant against our expected card info from MongoDB cache
-            verification_result = None
-            if expected_card_info:
-                # Extract a more comprehensive card name from title for verification
-                # Remove common suffixes to get cleaner card name for comparison
-                clean_title = variant['title']
-                for suffix in [' -', ' (', ' -', ' |']:
-                    if suffix in clean_title:
-                        clean_title = clean_title.split(suffix)[0]
-                
-                verification_result = verify_card_match(
-                    clean_title.strip(), 
-                    '', # We don't extract rarity from title here
-                    expected_card_info, 
-                    card_rarity or ''
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"success": False, "error": "Request body must be JSON"}), 400
+
+        # ----- Required payload fields -----
+        card_name = data.get("card_name", "").strip()
+        set_name = data.get("set_name", "").strip()
+        card_rarity = data.get("rarity", "").strip()
+
+        if not all([card_name, set_name, card_rarity]):
+            return (
+                jsonify({
+                    "success": False,
+                    "error": "card_name, set_name and rarity are all required"
+                }),
+                400,
+            )
+
+        # ----- Optional fields -----
+        card_number = data.get("card_number", "").strip() or None
+        art_variant = data.get("art_variant")  # may be None or empty string
+        if isinstance(art_variant, str):
+            art_variant = art_variant.strip()
+        force_refresh = str(data.get("force_refresh", "")).lower() == "true"
+
+        # Initialise sync cache if we later decide to persist data
+        initialize_sync_price_scraping()
+
+        # ----- Cache lookup (skip if force_refresh) -----
+        if not force_refresh:
+            is_fresh, cached = find_cached_price_data_sync(
+                card_number=card_number,
+                card_name=card_name,
+                card_rarity=card_rarity,
+                art_variant=art_variant,
+            )
+            if is_fresh and cached:
+                cleaned = clean_card_data(cached)
+                age = (datetime.now(UTC) - cleaned.get("last_price_updt", datetime.now(UTC))).total_seconds() / 3600
+                return jsonify({
+                    "success": True,
+                    "data": cleaned,
+                    "message": "Price data retrieved from cache",
+                    "is_cached": True,
+                    "cache_age_hours": age,
+                })
+
+        # -------------------------------------------------
+        #  Inner asynchronous scraper – works similarly to scrape_price_from_tcgplayer
+        #  but explicitly opens the Set filter panel and ticks the desired set
+        # -------------------------------------------------
+        async def scrape_custom():
+            from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                context = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
                 )
+                page = await context.new_page()
+
+                query = quote(card_name)
+                # Build search URL with set & rarity filters using TCGPlayer's working pattern
+                # Convert set name to kebab-case for URL path and use correct casing for productLineName
+                kebab_set_name = '-'.join(word.lower() for word in set_name.replace(':', '').split())
+                encoded_query = quote_plus(card_name)  # Use quote_plus for query params
+                encoded_rarity = quote_plus(map_rarity_to_tcgplayer_filter(card_rarity) or card_rarity)
                 
-                # Boost score for verified matches
-                if verification_result['overall_match']:
-                    score += 100  # Boost for verified cards
-                    logger.info(f"✓ Cache verification passed for {variant['title'][:50]}... (confidence: {verification_result['confidence_score']})")
-                else:
-                    logger.info(f"⚠ Cache verification failed for {variant['title'][:50]}... (confidence: {verification_result['confidence_score']})")
+                search_url = (
+                    f"https://www.tcgplayer.com/search/yugioh/{kebab_set_name}?"
+                    f"Language=English&productLineName=YuGiOh&q={encoded_query}"
+                    f"&view=grid&page=1&setName={kebab_set_name}&Rarity={encoded_rarity}"
+                )
+                logger.info(f"[CUSTOM] Navigating to {search_url}")
+                # Increased timeout and wait for both network and DOM stability
+                await page.goto(search_url, wait_until="domcontentloaded", timeout=120000)
                 
-            # Score for rarity match - use strict exact matching for better precision
-            if card_rarity:
-                target_rarity_normalized = normalize_rarity(card_rarity).lower().strip()
-                rarity_found = False
-                rarity_score = 0
+                # Try multiple selector patterns for results
+                result_selectors = [
+                    "a[data-testid='product-details-link']",  # Primary selector
+                    "a[class*='search-result']",  # Fallback class-based selector
+                    "div[class*='search-result'] a"  # More generic fallback
+                ]
                 
-                # First check extracted rarity data for exact match
-                if variant_rarity:
-                    variant_rarity_normalized = normalize_rarity(variant_rarity).lower().strip()
-                    
-                    if variant_rarity_normalized == target_rarity_normalized:
-                        # Perfect exact rarity match - highest score
-                        rarity_score = 400
-                        rarity_found = True
-                        logger.info(f"✓ PERFECT rarity match: '{card_rarity}' == '{variant.get('rarity', '')}'")
-                    else:
-                        # For non-exact matches, be much more strict to avoid confusion between similar rarities
-                        # Check if this is a meaningful partial match vs just sharing common words
-                        target_words = set(target_rarity_normalized.split())
-                        variant_words = set(variant_rarity_normalized.split())
-                        
-                        # Calculate word overlap, but require significant overlap to be considered partial
-                        common_words = target_words.intersection(variant_words)
-                        target_unique_words = target_words - {'rare', 'card'}  # Exclude generic words
-                        variant_unique_words = variant_words - {'rare', 'card'}
-                        
-                        # Only consider it a partial match if:
-                        # 1. Most meaningful words overlap AND
-                        # 2. No conflicting distinctive words (like "quarter century" vs "platinum")
-                        distinctive_conflicts = {
-                            'quarter', 'century', 'platinum', 'prismatic', 'starlight', 
-                            'collector', 'ghost', 'gold', 'parallel', 'mosaic'
-                        }
-                        
-                        target_distinctive = target_unique_words.intersection(distinctive_conflicts)
-                        variant_distinctive = variant_unique_words.intersection(distinctive_conflicts)
-                        
-                        # If both have distinctive words but they're different, heavily penalize
-                        if target_distinctive and variant_distinctive and not target_distinctive.intersection(variant_distinctive):
-                            rarity_score = -300  # Heavy penalty for conflicting rarities
-                            logger.warning(f"✗ CONFLICTING rarity types: '{card_rarity}' vs '{variant.get('rarity', '')}' (distinctive words: {target_distinctive} vs {variant_distinctive})")
-                        elif len(common_words) >= 2 and len(target_unique_words) > 0:
-                            # Meaningful partial match
-                            overlap_ratio = len(common_words) / max(len(target_unique_words), 1)
-                            if overlap_ratio >= 0.6:  # At least 60% overlap
-                                rarity_score = 50  # Very low score for partial matches
-                                rarity_found = True
-                                logger.info(f"⚠ Weak partial rarity match: '{card_rarity}' ~= '{variant.get('rarity', '')}' (overlap: {overlap_ratio:.1%})")
-                            else:
-                                rarity_score = -150
-                                logger.warning(f"✗ Insufficient rarity overlap: '{card_rarity}' vs '{variant.get('rarity', '')}' (overlap: {overlap_ratio:.1%})")
-                        else:
-                            # Different rarity - penalty
-                            rarity_score = -150
-                            logger.warning(f"✗ Rarity mismatch: '{card_rarity}' != '{variant.get('rarity', '')}'")
+                no_results_selectors = [
+                    "div[data-testid='search-results-no-results']",
+                    "div[class*='no-results']",
+                    "div:has-text('No results found')"
+                ]
                 
-                # Fallback to checking title if no extracted rarity data
-                if not rarity_found:
-                    # Generate all possible variations for flexible matching in title
-                    rarity_variants = normalize_rarity_for_matching(card_rarity)
-                    
-                    for rarity_variant in rarity_variants:
-                        if rarity_variant.lower() in title_lower:
-                            rarity_score = 25  # Much lower score for title-based match
-                            rarity_found = True
-                            logger.info(f"✓ Weak rarity match for '{card_rarity}' found in title")
+                # Take a screenshot for debugging
+                await page.screenshot(path='tcgplayer_search_page.png')
+                logger.info("Saved search page screenshot to tcgplayer_search_page.png")
+                
+                # Get page content for debugging
+                content = await page.content()
+                logger.debug(f"Page content length: {len(content)} characters")
+                
+                # Try to find results with increasing timeouts
+                result_element = None
+                max_wait = 45  # seconds total
+                start_time = time.time()
+                
+                while time.time() - start_time < max_wait and not result_element:
+                    # Check all result selectors
+                    for selector in result_selectors:
+                        elements = await page.query_selector_all(selector)
+                        if elements:
+                            result_element = elements[0]
+                            logger.info(f"Found {len(elements)} results with selector: {selector}")
                             break
-                
-                if not rarity_found:
-                    rarity_score = -100  # Penalize missing rarity match
-                    logger.warning(f"✗ No rarity match for '{card_rarity}' (extracted: '{variant.get('rarity', 'N/A')}')")
-                
-                score += rarity_score
-            
-            # Score for art variant match - improved precision
-            if target_art_version:
-                art_version_score = 0
-                target_art = str(target_art_version).strip().lower()
-                
-                # Extract art variant from this variant's title and URL
-                variant_art = extract_art_version(variant['title'])
-                if not variant_art:
-                    variant_art = extract_art_version(variant['href'])
-                
-                if variant_art:
-                    variant_art_normalized = str(variant_art).strip().lower()
-                    # Remove ordinal suffixes for comparison
-                    target_art_clean = re.sub(r'(st|nd|rd|th)$', '', target_art)
-                    variant_art_clean = re.sub(r'(st|nd|rd|th)$', '', variant_art_normalized)
                     
-                    if target_art_clean == variant_art_clean:
-                        # Exact art variant match - high score
-                        art_version_score = 100
-                        logger.info(f"✓ EXACT art variant match: '{target_art_version}' == '{variant_art}'")
-                    else:
-                        # Art variant mismatch - penalty
-                        art_version_score = -50
-                        logger.warning(f"✗ Art variant mismatch: '{target_art_version}' != '{variant_art}'")
-                else:
-                    # No art variant found in title - check for basic presence in text
-                    if target_art in title_lower or target_art in url_lower:
-                        art_version_score = 25
-                        logger.info(f"⚠ Weak art variant match for '{target_art_version}' found in text")
-                    else:
-                        # No art variant info available - small penalty
-                        art_version_score = -10
-                        logger.info(f"⚠ No art variant info found for comparison")
-                
-                score += art_version_score
+                    # If no results found, check for no-results message
+                    if not result_element:
+                        for selector in no_results_selectors:
+                            if await page.query_selector(selector):
+                                logger.error("No results message detected")
+                                await browser.close()
+                                return None
                     
-            # Small bonus for detailed titles (but not a major factor)
-            score += min(len(variant['title']) // 20, 5)
-            
-            scored_variants.append((score, variant))
-            logger.info(f"Final Score: {score} | Variant: {variant['title'][:80]}...")
-            
-            # Continue processing ALL variants as requested - no early termination
-        
-        # Sort by score and return the best match
-        scored_variants.sort(reverse=True, key=lambda x: x[0])
-        
-        if scored_variants and scored_variants[0][0] > 0:
-            best_variant = scored_variants[0][1]
-            best_score = scored_variants[0][0]
-            
-            # CRITICAL VALIDATION: Do a final check that our selected variant actually matches our requirements
-            best_title_lower = best_variant['title'].lower()
-            best_url_lower = best_variant['href'].lower()
-            best_card_number = best_variant.get('cardNumber', '').lower()
-            best_card_name = best_variant.get('cardName', '').lower()
-            
-            # Verify card number is present
-            card_number_present = True
-            if card_number:
-                card_number_lower = card_number.lower()
-                if best_card_number == card_number_lower:
-                    # Perfect match in extracted data
-                    pass
-                elif card_number_lower in best_title_lower or card_number_lower in best_url_lower:
-                    # Found in title or URL
-                    pass
-                else:
-                    card_number_present = False
-            
-            # Verify card name match if provided
-            card_name_match = True
-            if card_name:
-                expected_name = card_name.lower()
-                if best_card_name == expected_name:
-                    # Perfect match in extracted data
-                    pass
-                elif best_card_name:
-                    # Check if all words match in extracted name
-                    name_words = expected_name.split()
-                    card_name_match = all(word in best_card_name for word in name_words)
-                else:
-                    # Fallback to title check
-                    name_words = expected_name.split()
-                    card_name_match = all(word in best_title_lower for word in name_words)
-            
-            if not card_number_present:
-                logger.error(f"CRITICAL ERROR: Selected variant does not contain card number {card_number}")
-                logger.error(f"Selected: {best_variant['title']}")
-                logger.error(f"URL: {best_variant['href']}")
-                return None
+                    # If still no results, wait a bit and try again
+                    if not result_element:
+                        await asyncio.sleep(2)  # Wait 2 seconds between checks
                 
-            if not card_name_match:
-                logger.error(f"CRITICAL ERROR: Selected variant does not match card name '{card_name}'")
-                logger.error(f"Selected: {best_variant['title']}")
-                return None
-            
-            # Log final selection details
-            logger.info(f"="*80)
-            logger.info(f"FINAL SELECTION - Score: {best_score}")
-            logger.info(f"Title: {best_variant['title']}")
-            logger.info(f"URL: {best_variant['href']}")
-            logger.info(f"Extracted Data:")
-            logger.info(f"  Card Name: '{best_variant.get('cardName', 'N/A')}'")
-            logger.info(f"  Card Number: '{best_variant.get('cardNumber', 'N/A')}'")
-            logger.info(f"  Rarity: '{best_variant.get('rarity', 'N/A')}'")
-            logger.info(f"  Set: '{best_variant.get('setName', 'N/A')}'")
-            if expected_card_info:
-                logger.info(f"Expected from cache: {expected_card_info['card_name']} | {expected_card_info.get('set_rarity', 'Unknown rarity')}")
-                logger.info(f"Available rarities in cache: {expected_card_info['available_rarities']}")
-            logger.info(f"="*80)
-            
-            return best_variant['href']
-        else:
-            logger.warning("No suitable variant found based on scoring")
-            return None
-            
-    except Exception as e:
-        logger.error(f"Error selecting TCGPlayer variant: {e}")
-        return None
-
-
-async def select_best_card_variant(
-    page, 
-    card_number: str, 
-    card_name: Optional[str], 
-    card_rarity: Optional[str], 
-    target_art_version: Optional[str]
-) -> Optional[str]:
-    """Select best card variant prioritizing TCGPlayer rarity validation."""
-    try:
-        logger.info("="*80)
-        logger.info("STARTING VARIANT SELECTION WITH TCGPLAYER VALIDATION")
-        logger.info(f"Target Card Number: {card_number}")
-        logger.info(f"Target Rarity: {card_rarity}")
-        logger.info(f"Target Art Version: {target_art_version}")
-        logger.info("="*80)
-        
-        # Extract all product links from search results
-        variants = await page.evaluate("""
-            () => {
-                const variants = [];
-                const rows = Array.from(document.querySelectorAll('#games_table tbody tr, .search-results tr'));
+                if not result_element:
+                    logger.error("No search results found after waiting")
+                    await browser.close()
+                    return None
                 
-                rows.forEach(row => {
-                    const titleCell = row.querySelector('td.title');
-                    if (!titleCell) return;
-                    
-                    const link = titleCell.querySelector('a');
-                    if (!link) return;
-                    
-                    const href = link.getAttribute('href');
-                    const title = link.textContent.trim();
-                    
-                    if (href && href.includes('/game/')) {
-                        variants.push({
-                            title: title,
-                            href: href
-                        });
-                    }
-                });
-                
-                return variants;
-            }
-        """)
-
-        if not variants:
-            logger.warning("No variants found")
-            return None
-            
-        logger.info(f"Found {len(variants)} variants to check")
-        
-        # If we only have one variant, verify it meets our requirements
-        if len(variants) == 1:
-            variant = variants[0]
-            if card_rarity:
-                # Open the variant page to verify rarity
-                page_context = await page.context.new_page()
+                # If we get here, we have a result element
                 try:
-                    await page_context.goto(variant['href'], wait_until='networkidle', timeout=15000)
-                    tcg_rarity, tcg_art = await extract_rarity_from_tcgplayer(page_context)
-                    
-                    # Check both rarity and art variant if provided (case-insensitive)
-                    rarity_matches = tcg_rarity and normalize_rarity(tcg_rarity).lower() == normalize_rarity(card_rarity).lower()
-                    art_matches = not target_art_version or (tcg_art and str(tcg_art).strip().lower() == str(target_art_version).strip().lower())
-                    
-                    if rarity_matches and art_matches:
-                        logger.info(f"Single variant matches criteria - Rarity: {tcg_rarity}, Art: {tcg_art}")
-                        return variant['href']
-                    else:
-                        if not rarity_matches:
-                            logger.warning(f"Single variant has wrong rarity. Found: {tcg_rarity}, Expected: {card_rarity}")
-                        if not art_matches:
-                            logger.warning(f"Single variant has wrong art. Found: {tcg_art}, Expected: {target_art_version}")
-                        return None
-                finally:
-                    await page_context.close()
-            else:
-                return variant['href']
+                    logger.info("Clicking on first result")
+                    await result_element.click()
+                    await page.wait_for_load_state("networkidle", timeout=30000)
+                    logger.info("Successfully navigated to product page")
+                except Exception as e:
+                    logger.error(f"Error clicking result: {str(e)}")
+                    await browser.close()
+                    return None
+                except PWTimeout:
+                    logger.error("No search results found after applying filters")
+                    await browser.close()
+                    return None
 
-        # For multiple variants, first filter by card number
-        matching_variants = [
-            v for v in variants 
-            if card_number.lower() in v['title'].lower()
-        ]
+                # Extract price data on the product page
+                price_data = await extract_prices_from_tcgplayer_dom(page)
 
-        if not matching_variants:
-            logger.warning(f"No variants found matching card number {card_number}")
-            return None
+                # Build record using extracted price data
+                rec = {
+                    "card_number": card_number or "Unknown",
+                    "card_name": card_name,
+                    "card_art_variant": art_variant,
+                    "card_rarity": card_rarity,
+                    "booster_set_name": set_name.strip(),
+                    "tcg_price": price_data.get("tcg_price"),
+                    "tcg_market_price": price_data.get("tcg_market_price"),
+                    "source_url": page.url,
+                    "scrape_success": True,
+                    "last_price_updt": datetime.now(UTC),
+                }
 
-        # If art variant is specified, filter by that first
-        if target_art_version:
-            art_matching_variants = []
-            for variant in matching_variants:
-                title_lower = variant['title'].lower()
-                art_version = str(target_art_version).strip().lower()
-                
-                # Check for art variant in title
-                if art_version in title_lower:
-                    art_matching_variants.append(variant)
+                await browser.close()
+                return rec
 
-            if art_matching_variants:
-                matching_variants = art_matching_variants
-                logger.info(f"Found {len(matching_variants)} variants matching art variant {target_art_version}")
+        # Run async scraper
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            price_record = loop.run_until_complete(scrape_custom())
+        finally:
+            loop.close()
 
-        # Check each remaining variant's rarity and art variant via TCGPlayer
-        for variant in matching_variants:
-            page_context = await page.context.new_page()
-            try:
-                logger.info(f"Checking rarity for variant: {variant['title']}")
-                await page_context.goto(variant['href'], wait_until='networkidle', timeout=15000)
-                tcg_rarity, tcg_art = await extract_rarity_from_tcgplayer(page_context)
-                
-                if tcg_rarity:
-                    normalized_tcg = normalize_rarity(tcg_rarity).lower()
-                    normalized_requested = normalize_rarity(card_rarity).lower()
-                    
-                    logger.info(f"TCGPlayer rarity: {tcg_rarity} (normalized: {normalized_tcg})")
-                    logger.info(f"Requested rarity: {card_rarity} (normalized: {normalized_requested})")
-                    
-                    # Check both rarity and art variant (case-insensitive)
-                    rarity_matches = normalized_tcg == normalized_requested
-                    art_matches = not target_art_version or (tcg_art and str(tcg_art).strip().lower() == str(target_art_version).strip().lower())
-                    
-                    if rarity_matches and art_matches:
-                        logger.info(f"✓ Found perfect match! Rarity: {tcg_rarity}, Art: {tcg_art}")
-                        return variant['href']
-                    else:
-                        if not rarity_matches:
-                            logger.info("✗ TCGPlayer rarity does not match")
-                        if not art_matches:
-                            logger.info(f"✗ Art variant does not match. Found: {tcg_art}, Expected: {target_art_version}")
-                else:
-                    logger.info("Could not extract rarity from TCGPlayer")
-            finally:
-                await page_context.close()
-        
-        # If we get here with no match but have variants, return first matching variant
-        # if we weren't able to validate completely
-        if matching_variants:
-            logger.warning("No exact match found, using first matching variant")
-            return matching_variants[0]['href']
-            
-        return None
-        
+        if not price_record:
+            return (
+                jsonify({"success": False, "error": "Unable to retrieve data from TCGPlayer"}),
+                500,
+            )
+
+        # Clean & optionally cache the new data
+        cleaned = clean_card_data(price_record)
+        try:
+            save_price_data_sync(cleaned, art_variant)
+        except Exception as e:
+            logger.warning(f"[CUSTOM] Failed to save data to cache: {e}")
+
+        return jsonify({"success": True, "data": cleaned, "message": "Price data scraped successfully"})
+
     except Exception as e:
-        logger.error(f"Error selecting card variant: {e}")
-        return None
+        logger.error(f"Error in scrape_custom_card_price: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 
 async def extract_prices_from_tcgplayer_dom(page) -> Dict[str, Any]:
     """Extract price data from TCGPlayer product page DOM."""
