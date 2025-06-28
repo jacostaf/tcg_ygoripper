@@ -1437,7 +1437,21 @@ def scrape_custom_card_price():
             )
             if is_fresh and cached:
                 cleaned = clean_card_data(cached)
-                age = (datetime.now(UTC) - cleaned.get("last_price_updt", datetime.now(UTC))).total_seconds() / 3600
+                last_updated = cleaned.get("last_price_updt")
+                # Ensure last_updated is a datetime object
+                if isinstance(last_updated, str):
+                    try:
+                        last_updated = datetime.fromisoformat(last_updated.replace('Z', '+00:00'))
+                    except (ValueError, AttributeError):
+                        try:
+                            last_updated = datetime.strptime(last_updated, "%a, %d %b %Y %H:%M:%S GMT").replace(tzinfo=UTC)
+                        except (ValueError, AttributeError):
+                            last_updated = datetime.now(UTC)
+                
+                if not isinstance(last_updated, datetime):
+                    last_updated = datetime.now(UTC)
+                
+                age = (datetime.now(UTC) - last_updated).total_seconds() / 3600
                 return jsonify({
                     "success": True,
                     "data": cleaned,
@@ -1543,16 +1557,134 @@ def scrape_custom_card_price():
                     await browser.close()
                     return None
 
-                # Extract price data on the product page
-                price_data = await extract_prices_from_tcgplayer_dom(page)
-
+                # Extract price data on the product page with better error handling
+                price_data = {}
+                try:
+                    # First wait for price elements to be visible
+                    await page.wait_for_selector("div[class*='price-points']", timeout=10000)
+                    price_data = await extract_prices_from_tcgplayer_dom(page)
+                    
+                    # If we didn't get prices, try alternative selectors
+                    if not price_data.get('tcg_price') or not price_data.get('tcg_market_price'):
+                        logger.warning("Initial price extraction failed, trying alternative selectors...")
+                        price_data = await page.evaluate("""
+                            () => {
+                                const result = { tcg_price: null, tcg_market_price: null };
+                                
+                                // Try to find price elements
+                                const priceElements = Array.from(document.querySelectorAll('*'))
+                                    .filter(el => {
+                                        const text = el.textContent?.trim() || '';
+                                        return text.includes('$') && 
+                                               (text.includes('Market') || text.includes('Low'));
+                                    });
+                                
+                                // Look for market price
+                                const marketEl = priceElements.find(el => 
+                                    el.textContent.includes('Market') && 
+                                    el.textContent.includes('$')
+                                );
+                                
+                                if (marketEl) {
+                                    const match = marketEl.textContent.match(/\$([\d\.]+)/);
+                                    if (match) result.tcg_market_price = parseFloat(match[1]);
+                                }
+                                
+                                // Look for low price
+                                const lowEl = priceElements.find(el => 
+                                    (el.textContent.includes('Low') || el.textContent.includes('From')) && 
+                                    el.textContent.includes('$') &&
+                                    !el.textContent.includes('Market')
+                                );
+                                
+                                if (lowEl) {
+                                    const match = lowEl.textContent.match(/\$([\d\.]+)/);
+                                    if (match) result.tcg_price = parseFloat(match[1]);
+                                }
+                                
+                                return result;
+                            }
+                        """);
+                        
+                        logger.info(f"Extracted prices with fallback method: {price_data}")
+                        
+                except Exception as e:
+                    logger.error(f"Error extracting prices: {str(e)}")
+                    price_data = {'tcg_price': None, 'tcg_market_price': None}
+                
+                # Initialize variables
+                extracted_setcode = "Unknown"
+                extracted_card_number = "Unknown"
+                
+                try:
+                    # First try to find the product details container
+                    details_container = await page.query_selector("div[class*='product-details']")
+                    if not details_container:
+                        details_container = await page.query_selector("div[class*='product-detail']")
+                    
+                    if details_container:
+                        details_text = await details_container.inner_text()
+                        logger.debug(f"Product details text: {details_text[:200]}...")
+                        
+                        # Try to find set code and card number in format like "BLMM-EN003"
+                        setcode_match = re.search(r'\b([A-Z]{2,4}-[A-Z0-9]{2,5})\b', details_text)
+                        if setcode_match:
+                            extracted_setcode = setcode_match.group(1)
+                            logger.info(f"Extracted set code from details: {extracted_setcode}")
+                            
+                            # If we have a set code, try to extract just the card number part
+                            if '-' in extracted_setcode:
+                                card_part = extracted_setcode.split('-')[-1]
+                                if card_part.isalnum() and len(card_part) >= 2:
+                                    extracted_card_number = card_part
+                                    logger.info(f"Extracted card number from set code: {extracted_card_number}")
+                    
+                    # If we still don't have the card number, try to find it in the product title
+                    if extracted_card_number == "Unknown":
+                        title_element = await page.query_selector("h1[class*='product-details__name'], h1")
+                        if title_element:
+                            title_text = await title_element.inner_text()
+                            # Look for patterns like "#EN003" or "EN003" in the title
+                            card_num_match = re.search(r'(?:#|No\.?\s*)?([A-Z0-9]{2,5})\b', title_text)
+                            if card_num_match:
+                                extracted_card_number = card_num_match.group(1)
+                                logger.info(f"Extracted card number from title: {extracted_card_number}")
+                    
+                    # Try to get the card number from the URL as a last resort
+                    if extracted_card_number == "Unknown":
+                        url_match = re.search(r'/([^/]+)-([A-Z0-9]+)(?:-|$)', page.url)
+                        if url_match:
+                            url_card_num = url_match.group(2)
+                            if len(url_card_num) >= 2:  # Make sure it's at least 2 characters long
+                                extracted_card_number = url_card_num
+                                logger.info(f"Extracted card number from URL: {extracted_card_number}")
+                    
+                    # If we still don't have a set code, try to extract it from the URL
+                    if extracted_setcode == "Unknown":
+                        url_parts = page.url.split('/')
+                        if len(url_parts) > 4 and 'yugioh' in url_parts:
+                            # Look for a product ID that might contain the set code
+                            product_id = url_parts[url_parts.index('yugioh') + 2]  # Get the part after product ID
+                            # Try to extract a set code pattern
+                            set_match = re.search(r'([A-Z]{2,4})', product_id.upper())
+                            if set_match:
+                                extracted_setcode = set_match.group(1)
+                                logger.info(f"Extracted set code from URL: {extracted_setcode}")
+                    
+                except Exception as e:
+                    logger.warning(f"Error extracting set code/card number: {str(e)}")
+                
+                # Use the card number from the request only if we couldn't extract one
+                final_card_number = extracted_card_number if extracted_card_number != "Unknown" else (card_number or "Unknown")
+                
                 # Build record using extracted price data
                 rec = {
-                    "card_number": card_number or "Unknown",
+                    "card_number": final_card_number,
                     "card_name": card_name,
                     "card_art_variant": art_variant,
                     "card_rarity": card_rarity,
                     "booster_set_name": set_name.strip(),
+                    "setcode": extracted_setcode,
                     "tcg_price": price_data.get("tcg_price"),
                     "tcg_market_price": price_data.get("tcg_market_price"),
                     "source_url": page.url,
