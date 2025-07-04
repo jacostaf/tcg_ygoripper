@@ -52,3 +52,16 @@ logs
 # Flask
 instance/
 .webassets-cache
+
+# Backup files
+main_original.py
+oldWcacheMain.py
+
+# Test files
+test_*
+*_test.py
+
+# Temporary files
+tmp/
+temp/
+*.tmp
