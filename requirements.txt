@@ -1,21 +1,32 @@
 # Production dependencies for YGO Card Sets API
+# Compatible with Python 3.8+ including Python 3.13
+# 
+# Installation instructions:
+# 1. Create virtual environment: python -m venv venv
+# 2. Activate: source venv/bin/activate (Linux/macOS) or venv\Scripts\activate (Windows)
+# 3. Install: pip install -r requirements.txt
+# 4. Install playwright browsers: playwright install
+#
+# For Python 3.13 on macOS, you may need to install with:
+# pip install -r requirements.txt --upgrade
+
 # Web framework
-flask==2.3.3
+flask>=2.3.3,<4.0.0
 # HTTP client for API requests
-requests==2.31.0
+requests>=2.31.0,<3.0.0
 # Environment variable loading
-python-dotenv==1.0.0
+python-dotenv>=1.0.0,<2.0.0
 # MongoDB driver with DNS-related support
-pymongo[srv]==4.6.0
+pymongo[srv]>=4.6.0,<5.0.0
 # Browser automation for price scraping
-playwright==1.40.0
+playwright>=1.40.0,<2.0.0
 # Data validation and serialization
-pydantic==2.5.0
+pydantic>=2.5.0,<3.0.0
 # System and process monitoring for memory management
 psutil>=5.9.0
 # SSL/TLS certificate validation
 certifi>=2023.5.7
 # HTTP client library (dependency of requests)
-urllib3>=1.26.0
+urllib3>=1.26.0,<3.0.0
 # OpenSSL bindings for Python
 pyOpenSSL>=23.0.0
