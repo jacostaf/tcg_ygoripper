@@ -60,6 +60,11 @@ class PriceScrapingService:
             self.cache_collection = get_price_cache_collection()
             self.variants_collection = get_card_variants_collection()
             
+            # Check if database is disabled
+            if self.cache_collection is None or self.variants_collection is None:
+                logger.info("Database connections disabled, price scraping will run in offline mode")
+                return
+            
             # Create indexes for better query performance
             self.cache_collection.create_index("card_number", background=True)
             self.cache_collection.create_index("card_name", background=True)
@@ -70,7 +75,8 @@ class PriceScrapingService:
             
         except Exception as e:
             logger.error(f"Failed to initialize price scraping collections: {e}")
-            raise
+            self.cache_collection = None
+            self.variants_collection = None
     
     @monitor_memory
     def find_cached_price_data(
@@ -94,6 +100,11 @@ class PriceScrapingService:
         """
         try:
             self._ensure_initialized()
+            
+            # Check if database is disabled
+            if self.cache_collection is None:
+                logger.info("Database disabled, skipping cache lookup")
+                return None
             
             # Build query
             query = {
@@ -139,6 +150,11 @@ class PriceScrapingService:
         try:
             self._ensure_initialized()
             
+            # Check if database is disabled
+            if self.variants_collection is None:
+                logger.info("Database disabled, skipping rarity validation")
+                return True  # Allow validation to pass when database is disabled
+            
             # Get normalized rarity variants
             rarity_variants = normalize_rarity_for_matching(card_rarity)
             
@@ -173,6 +189,13 @@ class PriceScrapingService:
             bool: True if saved successfully
         """
         try:
+            self._ensure_initialized()
+            
+            # Check if database is disabled
+            if self.cache_collection is None:
+                logger.info("Database disabled, skipping price data save")
+                return True  # Return True to indicate success even when disabled
+            
             # Prepare document for insertion
             document = {
                 "card_number": price_data.get("card_number"),
@@ -226,6 +249,13 @@ class PriceScrapingService:
             Optional[Dict]: Card information if found
         """
         try:
+            self._ensure_initialized()
+            
+            # Check if database is disabled
+            if self.variants_collection is None:
+                logger.info("Database disabled, skipping card info lookup")
+                return None
+            
             # Try to find by set code matching
             query = {"set_code": {"$regex": card_number, "$options": "i"}}
             result = self.variants_collection.find_one(query, {"_id": 0})
@@ -322,6 +352,20 @@ class PriceScrapingService:
             Dict: Cache statistics
         """
         try:
+            self._ensure_initialized()
+            
+            # Check if database is disabled
+            if self.cache_collection is None:
+                logger.info("Database disabled, returning empty cache stats")
+                return {
+                    "total_entries": 0,
+                    "fresh_entries": 0,
+                    "stale_entries": 0,
+                    "unique_cards": 0,
+                    "cache_hit_rate": 0.0,
+                    "database_status": "disabled"
+                }
+            
             total_entries = self.cache_collection.count_documents({})
             
             # Count fresh vs stale entries

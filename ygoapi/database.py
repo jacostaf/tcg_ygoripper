@@ -7,6 +7,7 @@ resource management and connection pooling.
 
 import ssl
 import logging
+import os
 from typing import Optional, Dict, Any, List
 from pymongo import MongoClient
 from pymongo.collection import Collection
@@ -58,6 +59,11 @@ class DatabaseManager:
         Returns:
             MongoClient: MongoDB client instance
         """
+        # Check if database connections are disabled
+        if os.environ.get('DISABLE_DB_CONNECTION') == '1':
+            logger.info("Database connections disabled by DISABLE_DB_CONNECTION environment variable")
+            return None
+        
         if self._client is None:
             try:
                 # Connect with simplified SSL settings
@@ -80,7 +86,7 @@ class DatabaseManager:
                 try:
                     self._client = MongoClient(
                         self.connection_string,
-                        ssl_cert_reqs=ssl.CERT_NONE,
+                        tlsAllowInvalidCertificates=True,
                         connectTimeoutMS=MONGODB_CONNECT_TIMEOUT_MS,
                         serverSelectionTimeoutMS=MONGODB_SERVER_SELECTION_TIMEOUT_MS
                     )
@@ -103,8 +109,14 @@ class DatabaseManager:
         Returns:
             Database: MongoDB database instance
         """
+        if os.environ.get('DISABLE_DB_CONNECTION') == '1':
+            logger.info("Database connections disabled by DISABLE_DB_CONNECTION environment variable")
+            return None
+            
         if self._db is None:
             client = self.get_client()
+            if client is None:
+                return None
             self._db = client.get_default_database()
         
         return self._db
@@ -120,18 +132,26 @@ class DatabaseManager:
             Collection: MongoDB collection instance
         """
         db = self.get_database()
+        if db is None:
+            return None
         return db[collection_name]
     
     def get_card_sets_collection(self) -> Collection:
         """Get card sets collection."""
+        if os.environ.get('DISABLE_DB_CONNECTION') == '1':
+            return None
         return self.get_collection(MONGODB_COLLECTION_NAME)
     
     def get_card_variants_collection(self) -> Collection:
         """Get card variants collection."""
+        if os.environ.get('DISABLE_DB_CONNECTION') == '1':
+            return None
         return self.get_collection(MONGODB_CARD_VARIANTS_COLLECTION)
     
     def get_price_cache_collection(self) -> Collection:
         """Get price cache collection."""
+        if os.environ.get('DISABLE_DB_CONNECTION') == '1':
+            return None
         return self.get_collection(PRICE_CACHE_COLLECTION)
     
     @contextmanager
@@ -143,6 +163,11 @@ class DatabaseManager:
         Yields:
             MongoClient: Database client
         """
+        if os.environ.get('DISABLE_DB_CONNECTION') == '1':
+            logger.info("Database connections disabled by DISABLE_DB_CONNECTION environment variable")
+            yield None
+            return
+            
         client = None
         try:
             client = self.get_client()
@@ -161,7 +186,10 @@ class DatabaseManager:
             Database: Database instance
         """
         with self.get_connection() as client:
-            yield client.get_default_database()
+            if client is None:
+                yield None
+            else:
+                yield client.get_default_database()
     
     @contextmanager
     def get_collection_context(self, collection_name: str):
@@ -175,7 +203,10 @@ class DatabaseManager:
             Collection: Collection instance
         """
         with self.get_database_context() as db:
-            yield db[collection_name]
+            if db is None:
+                yield None
+            else:
+                yield db[collection_name]
     
     def close(self):
         """Close database connections."""
@@ -188,8 +219,15 @@ class DatabaseManager:
         Returns:
             bool: True if connection is successful
         """
+        # Check if database connections are disabled
+        if os.environ.get('DISABLE_DB_CONNECTION') == '1':
+            logger.info("Database connections disabled by DISABLE_DB_CONNECTION environment variable")
+            return True
+            
         try:
             with self.get_connection() as client:
+                if client is None:
+                    return False
                 client.admin.command('ping')
                 return True
         except Exception as e:
@@ -271,5 +309,10 @@ def test_database_connection() -> bool:
     Returns:
         bool: True if connection is successful
     """
+    # Check if database connections are disabled
+    if os.environ.get('DISABLE_DB_CONNECTION') == '1':
+        logger.info("Database connections disabled by DISABLE_DB_CONNECTION environment variable")
+        return True
+    
     db_manager = get_database_manager()
     return db_manager.test_connection()

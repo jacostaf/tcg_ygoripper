@@ -48,6 +48,9 @@ BATCH_SIZE = 100  # Default batch size for bulk operations
 # Memory Management Configuration
 MEM_LIMIT_MB = int(os.getenv('MEM_LIMIT', '512'))
 MEMORY_WARNING_THRESHOLD = 0.8
+
+# Application Configuration
+ALLOW_START_WITHOUT_DATABASE = os.getenv('ALLOW_START_WITHOUT_DATABASE', '0') == '1'
 MEMORY_CRITICAL_THRESHOLD = 0.9
 
 # Application Configuration

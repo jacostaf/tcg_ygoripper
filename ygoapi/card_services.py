@@ -132,6 +132,11 @@ class CardSetService:
         try:
             collection = get_card_sets_collection()
             
+            # Check if database is disabled
+            if collection is None:
+                logger.info("Database disabled, returning empty card sets")
+                return []
+            
             # Use projection to limit data returned
             cursor = collection.find({}, {"_id": 0})
             
@@ -161,6 +166,12 @@ class CardSetService:
         """
         try:
             collection = get_card_sets_collection()
+            
+            # Check if database is disabled
+            if collection is None:
+                logger.info("Database disabled, returning count of 0")
+                return 0
+            
             return collection.count_documents({})
         except Exception as e:
             logger.error(f"Error getting card sets count: {e}")
@@ -179,6 +190,11 @@ class CardSetService:
         """
         try:
             collection = get_card_sets_collection()
+            
+            # Check if database is disabled
+            if collection is None:
+                logger.info("Database disabled, returning empty search results")
+                return []
             
             # Case-insensitive search
             query = {"set_name": {"$regex": set_name, "$options": "i"}}

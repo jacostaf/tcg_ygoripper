@@ -9,7 +9,7 @@ import logging
 import os
 from flask import Flask
 
-from .config import validate_config, get_port, get_debug_mode, get_log_level
+from .config import validate_config, get_port, get_debug_mode, get_log_level, ALLOW_START_WITHOUT_DATABASE
 from .database import test_database_connection
 from .memory_manager import get_memory_manager
 from .routes import register_routes
@@ -43,11 +43,15 @@ def create_app() -> Flask:
     logger.info(f"Memory manager initialized with limit: {memory_manager.limit_mb}MB")
     
     # Test database connection
-    if not test_database_connection():
-        logger.error("Database connection test failed")
-        raise RuntimeError("Database connection failed")
-    
-    logger.info("Database connection test passed")
+    database_available = test_database_connection()
+    if not database_available:
+        if ALLOW_START_WITHOUT_DATABASE:
+            logger.warning("Database connection failed, but continuing startup as ALLOW_START_WITHOUT_DATABASE is enabled")
+        else:
+            logger.error("Database connection test failed")
+            raise RuntimeError("Database connection failed")
+    else:
+        logger.info("Database connection test passed")
     
     # Register routes
     register_routes(app)

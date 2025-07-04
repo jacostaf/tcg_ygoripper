@@ -112,7 +112,14 @@ def register_routes(app: Flask) -> None:
             if result.get('success'):
                 return jsonify(result)
             else:
-                return jsonify(result), 500
+                # Check if it's a user error (404) or server error (500)
+                error_msg = result.get('error', '').lower()
+                if 'not found' in error_msg or 'could not find' in error_msg or 'no card' in error_msg:
+                    return jsonify(result), 404
+                elif 'invalid' in error_msg or 'required' in error_msg:
+                    return jsonify(result), 400
+                else:
+                    return jsonify(result), 500
             
         except Exception as e:
             logger.error(f"Error in scrape_card_price: {e}")
