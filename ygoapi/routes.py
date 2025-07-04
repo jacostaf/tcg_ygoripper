@@ -109,17 +109,45 @@ def register_routes(app: Flask) -> None:
                 force_refresh=force_refresh
             )
             
+            # Format response to match original API format
+            response = {
+                "success": result.get('success', False),
+                "card_number": card_number or "",
+                "card_name": card_name or "",
+                "card_rarity": card_rarity,
+                "art_variant": art_variant or "",
+                "cached": result.get('cached', False),
+                "last_updated": result.get('last_updated', ''),
+                "tcgplayer_price": result.get('tcgplayer_price'),
+                "tcgplayer_market_price": result.get('tcgplayer_market_price'),
+                "tcgplayer_url": result.get('tcgplayer_url'),
+                "tcgplayer_product_id": result.get('tcgplayer_product_id'),
+                "tcgplayer_variant_selected": result.get('tcgplayer_variant_selected')
+            }
+            
+            # Format last_updated to match original format
+            if result.get('last_updated'):
+                last_updated = result['last_updated']
+                if hasattr(last_updated, 'strftime'):
+                    response['last_updated'] = last_updated.strftime("%a, %d %b %Y %H:%M:%S GMT")
+                else:
+                    response['last_updated'] = str(last_updated)
+            
+            # Add error if present
+            if result.get('error'):
+                response['error'] = result['error']
+            
             if result.get('success'):
-                return jsonify(result)
+                return jsonify(response)
             else:
                 # Check if it's a user error (404) or server error (500)
                 error_msg = result.get('error', '').lower()
                 if 'not found' in error_msg or 'could not find' in error_msg or 'no card' in error_msg:
-                    return jsonify(result), 404
+                    return jsonify(response), 404
                 elif 'invalid' in error_msg or 'required' in error_msg:
-                    return jsonify(result), 400
+                    return jsonify(response), 400
                 else:
-                    return jsonify(result), 500
+                    return jsonify(response), 500
             
         except Exception as e:
             logger.error(f"Error in scrape_card_price: {e}")

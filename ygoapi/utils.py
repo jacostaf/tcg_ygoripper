@@ -446,4 +446,152 @@ def get_current_utc_datetime() -> datetime:
 
 def format_datetime_for_api(dt: datetime) -> str:
     """Format datetime for API response."""
-    return dt.isoformat() if dt else ""
+    return dt.strftime("%a, %d %b %Y %H:%M:%S GMT") if dt else ""
+
+
+def extract_set_code(card_number: str) -> Optional[str]:
+    """Extract set code from card number."""
+    if not card_number:
+        return None
+    
+    # Most Yu-Gi-Oh card numbers follow the pattern: SETCODE-REGION###
+    # Handle both numeric and alphanumeric card numbers
+    match = re.match(r'^([A-Z]+\d*)-[A-Z]{2}\d+$', card_number.upper())
+    if match:
+        set_code = match.group(1)
+        return set_code
+    
+    # Fallback: try to extract the first part before the hyphen
+    if '-' in card_number:
+        potential_set_code = card_number.split('-')[0].upper()
+        if len(potential_set_code) >= 2 and potential_set_code.isalpha():
+            return potential_set_code
+    
+    return None
+
+
+def map_rarity_to_tcgplayer_filter(rarity: str) -> Optional[str]:
+    """Map YGO rarity to TCGPlayer rarity filter value."""
+    if not rarity:
+        return None
+    
+    rarity_lower = rarity.lower().strip()
+    
+    # Map common rarity variations to TCGPlayer filter values
+    # These need to match exactly how they appear in TCGPlayer's filter dropdown
+    rarity_mappings = {
+        'platinum secret rare': 'Platinum Secret Rare',
+        'quarter century secret rare': 'Quarter Century Secret Rare', 
+        'secret rare': 'Secret Rare',
+        'ultra rare': 'Ultra Rare',
+        'super rare': 'Super Rare',
+        'rare': 'Rare',
+        'common': 'Common / Short Print',
+        'common / short print': 'Common / Short Print',
+        'starlight rare': 'Starlight Rare',
+        'collector\'s rare': 'Collector\'s Rare',
+        'collectors rare': 'Collector\'s Rare',
+        'ghost rare': 'Ghost Rare',
+        'gold rare': 'Gold Rare',
+        'premium gold rare': 'Premium Gold Rare',
+        'prismatic secret rare': 'Prismatic Secret Rare',
+        'prismatic ultimate rare': 'Prismatic Ultimate Rare',
+        'ultimate rare': 'Ultimate Rare',
+        'starfoil rare': 'Starfoil Rare'
+    }
+    
+    tcgplayer_rarity = rarity_mappings.get(rarity_lower)
+    if tcgplayer_rarity:
+        return tcgplayer_rarity
+    
+    return None
+
+
+def extract_booster_set_name(source_url: str) -> Optional[str]:
+    """Extract booster set name from TCGPlayer URL."""
+    if not source_url:
+        return None
+    
+    try:
+        # TCGPlayer URLs often contain set information in the path
+        # Example: https://www.tcgplayer.com/product/626754/yugioh-quarter-century-stampede-black-metal-dragon-secret-rare
+        
+        # Look for yugioh-{set-name} pattern in TCGPlayer URLs
+        set_match = re.search(r'/yugioh-([^/]+?)(?:-[^-/]*?-(?:secret|ultra|super|rare|common))', source_url, re.IGNORECASE)
+        if set_match:
+            set_name = set_match.group(1)
+            # Clean and format set name
+            set_name = set_name.replace('-', ' ').title()
+            # Handle specific known abbreviations
+            if 'quarter-century' in set_name.lower() or 'quarter century' in set_name.lower():
+                return 'Quarter Century Stampede'
+            return set_name
+            
+        # Fallback: look for any meaningful set identifier in the URL
+        path_parts = source_url.split('/')
+        for part in path_parts:
+            if 'yugioh-' in part.lower() and len(part) > 10:
+                set_candidate = part.replace('yugioh-', '').replace('-', ' ').title()
+                # Remove card-specific terms
+                set_candidate = re.sub(r'\b(Secret|Ultra|Super|Rare|Common)\b.*$', '', set_candidate, flags=re.IGNORECASE).strip()
+                if len(set_candidate) > 3:  # Avoid single words
+                    return set_candidate
+                    
+        return None
+        
+    except Exception as e:
+        return None
+
+
+def map_set_code_to_tcgplayer_name(set_code: str) -> Optional[str]:
+    """Map YGO set code to TCGPlayer set name using MongoDB cache."""
+    if not set_code:
+        return None
+    
+    try:
+        from .database import get_card_sets_collection
+        
+        # Get the sets collection
+        sets_collection = get_card_sets_collection()
+        
+        if sets_collection is None:
+            # Database not available, use fallback mappings
+            fallback_mappings = {
+                'RA04': 'Quarter Century Stampede',
+                'RA03': 'Quarter Century Bonanza',
+                'SUDA': 'Supreme Darkness',
+                'BLTR': 'Battles of Legend: Terminal Revenge'
+            }
+            
+            return fallback_mappings.get(set_code.upper())
+        
+        # Search for the set by code (case-insensitive)
+        set_document = sets_collection.find_one(
+            {"set_code": {"$regex": f"^{re.escape(set_code)}$", "$options": "i"}},
+            {"set_name": 1, "_id": 0}
+        )
+        
+        if set_document and 'set_name' in set_document:
+            set_name = set_document['set_name']
+            return set_name
+        else:
+            # Fallback to hardcoded mappings for critical sets if MongoDB lookup fails
+            fallback_mappings = {
+                'RA04': 'Quarter Century Stampede',
+                'RA03': 'Quarter Century Bonanza',
+                'SUDA': 'Supreme Darkness',
+                'BLTR': 'Battles of Legend: Terminal Revenge'
+            }
+            
+            return fallback_mappings.get(set_code.upper())
+            
+    except Exception as e:
+        # Fallback to hardcoded mappings if MongoDB fails
+        fallback_mappings = {
+            'RA04': 'Quarter Century Stampede',
+            'RA03': 'Quarter Century Bonanza', 
+            'SUDA': 'Supreme Darkness',
+            'BLTR': 'Battles of Legend: Terminal Revenge'
+        }
+        
+        return fallback_mappings.get(set_code.upper())

@@ -10,6 +10,7 @@ import logging
 from datetime import datetime, timedelta, UTC
 from typing import Dict, List, Optional, Any, Tuple
 from playwright.async_api import async_playwright
+from urllib.parse import quote
 import requests
 
 from .config import (
@@ -33,7 +34,12 @@ from .utils import (
     normalize_art_variant,
     clean_card_data,
     is_cache_fresh,
-    get_current_utc_datetime
+    get_current_utc_datetime,
+    extract_art_version,
+    extract_set_code,
+    map_rarity_to_tcgplayer_filter,
+    extract_booster_set_name,
+    map_set_code_to_tcgplayer_name
 )
 from .memory_manager import monitor_memory, get_memory_manager
 
@@ -398,7 +404,7 @@ class PriceScrapingService:
         art_variant: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Basic price scraping from TCGPlayer (simplified implementation).
+        Price scraping from TCGPlayer using Playwright.
         
         Args:
             card_name: Card name to search for
@@ -409,20 +415,93 @@ class PriceScrapingService:
             Dict: Scraped price data
         """
         try:
-            # This is a simplified implementation
-            # In production, this would use Playwright to scrape TCGPlayer
             logger.info(f"Scraping price for {card_name} ({card_rarity})")
             
-            # Return mock data for now (would be replaced with actual scraping)
-            return {
-                "tcgplayer_price": None,
-                "tcgplayer_market_price": None,
-                "tcgplayer_url": None,
-                "tcgplayer_product_id": None,
-                "tcgplayer_variant_selected": None,
-                "error": "Price scraping not fully implemented in this version"
-            }
+            # Extract art version from card name if not provided
+            if not art_variant and card_name:
+                art_variant = extract_art_version(card_name)
             
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                context = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+                )
+                page = await context.new_page()
+                
+                # Build search URL for TCGPlayer
+                search_url = f"https://www.tcgplayer.com/search/yugioh/product?Language=English&productLineName=yugioh&q={quote(card_name)}&view=grid"
+                
+                # Add rarity filter if available
+                if card_rarity:
+                    tcgplayer_rarity_filter = map_rarity_to_tcgplayer_filter(card_rarity)
+                    if tcgplayer_rarity_filter:
+                        search_url += f"&Rarity={quote(tcgplayer_rarity_filter)}"
+                
+                logger.info(f"Searching TCGPlayer: {search_url}")
+                
+                await page.goto(search_url, wait_until='networkidle', timeout=60000)
+                
+                # Check if we got results
+                results_count = await page.evaluate("""
+                    () => {
+                        const resultText = document.querySelector('h1')?.textContent || '';
+                        const match = resultText.match(/(\\d+)\\s+results?\\s+for/);
+                        return match ? parseInt(match[1]) : 0;
+                    }
+                """)
+                
+                if results_count == 0:
+                    logger.warning(f"No results found for {card_name}")
+                    await browser.close()
+                    return {
+                        "tcgplayer_price": None,
+                        "tcgplayer_market_price": None,
+                        "tcgplayer_url": None,
+                        "tcgplayer_product_id": None,
+                        "tcgplayer_variant_selected": None,
+                        "error": "No results found on TCGPlayer"
+                    }
+                
+                # Check if we landed directly on a product page or on search results
+                is_product_page = await page.evaluate("() => document.querySelector('.product-details, .product-title, h1[data-testid=\"product-name\"]') !== null")
+                
+                if not is_product_page:
+                    # We're on search results, select best variant
+                    best_variant_url = await self.select_best_tcgplayer_variant(
+                        page, None, card_name, card_rarity, art_variant
+                    )
+                    
+                    if best_variant_url:
+                        logger.info(f"Selected best variant: {best_variant_url}")
+                        await page.goto(best_variant_url, wait_until='networkidle', timeout=60000)
+                    else:
+                        logger.warning(f"No suitable variant found for {card_name}")
+                        await browser.close()
+                        return {
+                            "tcgplayer_price": None,
+                            "tcgplayer_market_price": None,
+                            "tcgplayer_url": None,
+                            "tcgplayer_product_id": None,
+                            "tcgplayer_variant_selected": None,
+                            "error": "No suitable variant found"
+                        }
+                
+                # Extract prices from the product page
+                price_data = await self.extract_prices_from_tcgplayer_dom(page)
+                
+                # Get final URL
+                final_url = page.url
+                
+                await browser.close()
+                
+                return {
+                    "tcgplayer_price": price_data.get('tcg_price'),
+                    "tcgplayer_market_price": price_data.get('tcg_market_price'),
+                    "tcgplayer_url": final_url,
+                    "tcgplayer_product_id": None,  # Could be extracted from URL if needed
+                    "tcgplayer_variant_selected": None
+                }
+                
         except Exception as e:
             logger.error(f"Error scraping price from TCGPlayer: {e}")
             return {
@@ -525,6 +604,247 @@ class PriceScrapingService:
                 "art_variant": art_variant,
                 "error": str(e)
             }
+    
+    @monitor_memory
+    async def select_best_tcgplayer_variant(
+        self,
+        page, 
+        card_number: Optional[str], 
+        card_name: Optional[str], 
+        card_rarity: Optional[str], 
+        target_art_version: Optional[str],
+        max_variants_to_process: int = None
+    ) -> Optional[str]:
+        """Select best card variant from TCGPlayer search results."""
+        if max_variants_to_process is None:
+            max_variants_to_process = TCGPLAYER_DEFAULT_VARIANT_LIMIT
+        
+        try:
+            logger.info(f"Selecting best TCGPlayer variant for {card_name} ({card_rarity})")
+            
+            # Extract product links from TCGPlayer search results
+            variants = await page.evaluate("""
+                (maxVariants) => {
+                    const variants = [];
+                    const productLinks = Array.from(document.querySelectorAll('a[href*="/product/"]'));
+                    
+                    const linksToProcess = productLinks.slice(0, maxVariants);
+                    
+                    linksToProcess.forEach(link => {
+                        const href = link.getAttribute('href');
+                        
+                        // Extract product information
+                        let cardName = '';
+                        let setName = '';
+                        let rarity = '';
+                        let cardNumber = '';
+                        
+                        // Extract from structured elements
+                        const heading = link.querySelector('h4');
+                        if (heading) {
+                            setName = heading.textContent ? heading.textContent.trim() : '';
+                        }
+                        
+                        const generics = link.querySelectorAll('generic');
+                        generics.forEach(generic => {
+                            const text = generic.textContent ? generic.textContent.trim() : '';
+                            
+                            if (text.startsWith('#')) {
+                                cardNumber = text.replace('#', '').trim();
+                            } else if (text.match(/quarter\\s+century\\s+secret\\s+rare/i)) {
+                                rarity = 'Quarter Century Secret Rare';
+                            } else if (text.match(/secret\\s+rare/i)) {
+                                rarity = 'Secret Rare';
+                            } else if (text.match(/ultra\\s+rare/i)) {
+                                rarity = 'Ultra Rare';
+                            } else if (text.match(/super\\s+rare/i)) {
+                                rarity = 'Super Rare';
+                            } else if (text.match(/\\bcommon\\b/i)) {
+                                rarity = 'Common';
+                            } else if (text.match(/\\brare\\b/i) && !text.includes('$')) {
+                                rarity = 'Rare';
+                            } else if (text.length > 3 && /[a-zA-Z]/.test(text) && 
+                                     !text.includes('listings') && !text.includes('$') && 
+                                     !text.startsWith('#') && text !== setName) {
+                                if (text.length > cardName.length) {
+                                    cardName = text;
+                                }
+                            }
+                        });
+                        
+                        variants.push({
+                            url: href.startsWith('http') ? href : 'https://www.tcgplayer.com' + href,
+                            card_name: cardName,
+                            set_name: setName,
+                            rarity: rarity,
+                            card_number: cardNumber
+                        });
+                    });
+                    
+                    return variants;
+                }
+            """, max_variants_to_process)
+            
+            if not variants:
+                logger.warning("No variants found")
+                return None
+            
+            # Score and select best variant
+            best_variant = None
+            best_score = -1
+            
+            for variant in variants:
+                score = 0
+                
+                # Score by rarity match
+                if card_rarity and variant.get('rarity'):
+                    if variant['rarity'].lower() == card_rarity.lower():
+                        score += 100
+                    elif card_rarity.lower() in variant['rarity'].lower():
+                        score += 50
+                
+                # Score by name match
+                if card_name and variant.get('card_name'):
+                    if variant['card_name'].lower() == card_name.lower():
+                        score += 100
+                    elif card_name.lower() in variant['card_name'].lower():
+                        score += 50
+                
+                # Score by card number match
+                if card_number and variant.get('card_number'):
+                    if variant['card_number'] == card_number:
+                        score += 200
+                
+                if score > best_score:
+                    best_score = score
+                    best_variant = variant
+            
+            if best_variant:
+                logger.info(f"Selected variant with score {best_score}: {best_variant['card_name']} ({best_variant['rarity']})")
+                return best_variant['url']
+            
+            # Fallback to first variant if no good match
+            logger.warning("No good variant match found, using first variant")
+            return variants[0]['url']
+            
+        except Exception as e:
+            logger.error(f"Error selecting TCGPlayer variant: {e}")
+            return None
+    
+    @monitor_memory
+    async def extract_prices_from_tcgplayer_dom(self, page) -> Dict[str, Any]:
+        """Extract price data from TCGPlayer product page DOM."""
+        try:
+            prices = await page.evaluate("""
+                () => {
+                    const extractPrice = (text) => {
+                        if (!text) return null;
+                        const match = text.match(/\\$([\\d,]+(?:\\.\\d{2})?)/);
+                        if (match) {
+                            const price = parseFloat(match[1].replace(/,/g, ''));
+                            return (price >= 0.01 && price <= 10000) ? price : null;
+                        }
+                        return null;
+                    };
+                    
+                    const result = {
+                        tcg_price: null,
+                        tcg_market_price: null,
+                        debug_info: []
+                    };
+                    
+                    // Look for Market Price in table rows
+                    const marketPriceRows = Array.from(document.querySelectorAll('tr')).filter(row => {
+                        const text = row.textContent?.toLowerCase() || '';
+                        return text.includes('market price') && text.includes('$');
+                    });
+                    
+                    for (const row of marketPriceRows) {
+                        const cells = Array.from(row.querySelectorAll('td'));
+                        const labelCell = cells.find(cell => 
+                            cell.textContent?.toLowerCase().includes('market price'));
+                        
+                        if (labelCell) {
+                            const labelIndex = cells.indexOf(labelCell);
+                            for (let i = labelIndex + 1; i < cells.length; i++) {
+                                const priceCell = cells[i];
+                                const price = extractPrice(priceCell.textContent);
+                                if (price !== null) {
+                                    result.tcg_market_price = price;
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if (result.tcg_market_price !== null) break;
+                    }
+                    
+                    // Look for TCG Low/Low Price in table rows
+                    const tcgLowRows = Array.from(document.querySelectorAll('tr')).filter(row => {
+                        const text = row.textContent?.toLowerCase() || '';
+                        return (text.includes('tcg low') || text.includes('low price') || 
+                                text.includes('tcg direct low') || 
+                                (text.includes('low') && !text.includes('market'))) && text.includes('$');
+                    });
+                    
+                    for (const row of tcgLowRows) {
+                        const cells = Array.from(row.querySelectorAll('td'));
+                        const labelCell = cells.find(cell => {
+                            const text = cell.textContent?.toLowerCase() || '';
+                            return text.includes('tcg low') || text.includes('low price') || 
+                                   (text.includes('low') && !text.includes('market'));
+                        });
+                        
+                        if (labelCell) {
+                            const labelIndex = cells.indexOf(labelCell);
+                            for (let i = labelIndex + 1; i < cells.length; i++) {
+                                const priceCell = cells[i];
+                                const price = extractPrice(priceCell.textContent);
+                                if (price !== null) {
+                                    result.tcg_price = price;
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if (result.tcg_price !== null) break;
+                    }
+                    
+                    // Fallback: search all elements for prices
+                    if (!result.tcg_market_price || !result.tcg_price) {
+                        const allElements = Array.from(document.querySelectorAll('*')).filter(el => {
+                            const style = window.getComputedStyle(el);
+                            return style.display !== 'none' && style.visibility !== 'hidden' && 
+                                   el.offsetHeight > 0 && el.offsetWidth > 0 && el.textContent?.trim();
+                        });
+                        
+                        for (const element of allElements) {
+                            const text = element.textContent?.toLowerCase() || '';
+                            if (text.includes('market price') && text.includes('$')) {
+                                const price = extractPrice(element.textContent);
+                                if (price !== null && result.tcg_market_price === null) {
+                                    result.tcg_market_price = price;
+                                }
+                            }
+                            
+                            if (text.includes('tcg low') && text.includes('$')) {
+                                const price = extractPrice(element.textContent);
+                                if (price !== null && result.tcg_price === null) {
+                                    result.tcg_price = price;
+                                }
+                            }
+                        }
+                    }
+                    
+                    return result;
+                }
+            """)
+            
+            return prices
+            
+        except Exception as e:
+            logger.error(f"Error extracting prices from TCGPlayer DOM: {e}")
+            return {"tcg_price": None, "tcg_market_price": None}
 
 # Global service instance
 price_scraping_service = PriceScrapingService()
