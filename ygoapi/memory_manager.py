@@ -48,11 +48,15 @@ class MemoryManager:
         """
         memory_info = self.process.memory_info()
         memory_percent = self.process.memory_percent()
+        usage_mb = memory_info.rss / 1024 / 1024
+        usage_percentage = (memory_info.rss / self.limit_bytes) * 100
         
         return {
-            'rss_mb': memory_info.rss / 1024 / 1024,
+            'rss_mb': usage_mb,
             'vms_mb': memory_info.vms / 1024 / 1024,
             'percent': memory_percent,
+            'usage_percentage': usage_percentage,
+            'usage_mb': usage_mb,
             'limit_mb': self.limit_mb,
             'usage_ratio': memory_info.rss / self.limit_bytes,
             'warning_threshold': self.warning_threshold,

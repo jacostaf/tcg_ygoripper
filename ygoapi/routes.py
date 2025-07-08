@@ -173,28 +173,67 @@ def register_routes(app: Flask) -> None:
                 "error": "Internal server error"
             }), 500
     
-    @app.route('/debug/art-extraction', methods=['POST'])
+    @app.route('/debug/cache-lookup', methods=['POST'])
     @monitor_memory
-    def debug_art_extraction():
-        """Debug endpoint to test art variant extraction."""
+    def debug_cache_lookup():
+        """Debug endpoint to test cache lookup behavior."""
         try:
             data = request.get_json()
-            test_strings = data.get('test_strings', [])
             
-            results = []
-            for test_string in test_strings:
-                extracted_art = extract_art_version(test_string)
-                results.append({
-                    'input': test_string,
-                    'extracted_art': extracted_art
-                })
+            if not data:
+                return jsonify({
+                    "success": False,
+                    "error": "Request body must be JSON"
+                }), 400
+            
+            card_number = data.get('card_number', '').strip() if data.get('card_number') else ''
+            card_name = data.get('card_name', '').strip() if data.get('card_name') else ''
+            card_rarity = data.get('card_rarity', '').strip() if data.get('card_rarity') else ''
+            art_variant = data.get('art_variant', '').strip() if data.get('art_variant') else None
+            
+            # Get cache collection stats
+            cache_stats = price_scraping_service.get_cache_stats()
+            
+            # Try cache lookup
+            cached_data = price_scraping_service.find_cached_price_data(
+                card_number, card_name, card_rarity, art_variant
+            )
+            
+            # Check all documents for this card (ignoring freshness)
+            from .database import get_price_cache_collection
+            cache_collection = get_price_cache_collection()
+            
+            all_documents = []
+            if cache_collection:
+                # Find all documents matching card number
+                if card_number:
+                    all_docs = list(cache_collection.find({"card_number": card_number}))
+                    all_documents.extend([{
+                        "card_number": doc.get("card_number"),
+                        "card_name": doc.get("card_name"), 
+                        "card_rarity": doc.get("card_rarity"),
+                        "art_variant": doc.get("art_variant"),
+                        "last_price_updt": str(doc.get("last_price_updt")),
+                        "tcgplayer_price": doc.get("tcgplayer_price")
+                    } for doc in all_docs])
             
             return jsonify({
                 'success': True,
-                'results': results
+                'lookup_params': {
+                    'card_number': card_number,
+                    'card_name': card_name,
+                    'card_rarity': card_rarity,
+                    'art_variant': art_variant
+                },
+                'cache_hit': cached_data is not None,
+                'cached_data': clean_card_data(cached_data) if cached_data else None,
+                'cache_stats': cache_stats,
+                'all_matching_documents': all_documents,
+                'total_matching_docs': len(all_documents)
             })
             
         except Exception as e:
+            logger.error(f"Error in debug cache lookup: {e}")
             return jsonify({
                 'success': False,
                 'error': str(e)
@@ -401,6 +440,33 @@ def register_routes(app: Flask) -> None:
             return jsonify({
                 "success": False,
                 "error": "Internal server error"
+            }), 500
+    
+    @app.route('/debug/art-extraction', methods=['POST'])
+    @monitor_memory
+    def debug_art_extraction():
+        """Debug endpoint to test art variant extraction."""
+        try:
+            data = request.get_json()
+            test_strings = data.get('test_strings', [])
+            
+            results = []
+            for test_string in test_strings:
+                extracted_art = extract_art_version(test_string)
+                results.append({
+                    'input': test_string,
+                    'extracted_art': extracted_art
+                })
+            
+            return jsonify({
+                'success': True,
+                'results': results
+            })
+            
+        except Exception as e:
+            return jsonify({
+                'success': False,
+                'error': str(e)
             }), 500
     
     @app.errorhandler(404)

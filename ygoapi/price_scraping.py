@@ -109,7 +109,7 @@ class PriceScrapingService:
             
             # Check if database is disabled
             if self.cache_collection is None:
-                logger.info("Database disabled, skipping cache lookup")
+                logger.debug("Database disabled, skipping cache lookup")
                 return None
             
             # Build query
@@ -123,6 +123,8 @@ class PriceScrapingService:
             if art_variant is not None:
                 query["art_variant"] = art_variant
             
+            logger.debug(f"Cache query: {query}")
+            
             # Find document
             document = self.cache_collection.find_one(query)
             
@@ -130,15 +132,18 @@ class PriceScrapingService:
                 # Check if cache is fresh
                 last_updated = document.get('last_price_updt')
                 if last_updated and is_cache_fresh(last_updated, PRICE_CACHE_EXPIRY_DAYS):
-                    logger.info(f"Found fresh cached price data for {card_number}")
+                    logger.info(f"Found fresh cached price data for {card_number} (updated: {last_updated})")
                     return document
                 else:
-                    logger.info(f"Cached price data for {card_number} is stale")
+                    logger.info(f"Found stale cached price data for {card_number} (updated: {last_updated})")
+                    logger.info(f"Cache expiry: {PRICE_CACHE_EXPIRY_DAYS} days")
+            else:
+                logger.info(f"No cached price data found for {card_number}")
             
             return None
             
         except Exception as e:
-            logger.error(f"Error finding cached price data: {e}")
+            logger.error(f"Error finding cached price data for {card_number}: {e}")
             return None
     
     @monitor_memory
@@ -538,10 +543,12 @@ class PriceScrapingService:
         try:
             # Check cache first unless force refresh
             if not force_refresh:
+                logger.info(f"Checking cache for card: {card_number}, name: {card_name}, rarity: {card_rarity}, art: {art_variant}")
                 cached_data = self.find_cached_price_data(
                     card_number, card_name, card_rarity, art_variant
                 )
                 if cached_data:
+                    logger.info(f"✓ Using cached price data for {card_number} - cache hit!")
                     cleaned_data = clean_card_data(cached_data)
                     return {
                         "success": True,
@@ -553,8 +560,13 @@ class PriceScrapingService:
                         "last_updated": cached_data.get('last_price_updt'),
                         **cleaned_data
                     }
+                else:
+                    logger.info(f"No cached data found for {card_number} - will scrape fresh data")
+            else:
+                logger.info(f"Force refresh requested for {card_number} - skipping cache")
             
             # Scrape from source
+            logger.info(f"Scraping fresh price data from TCGPlayer for {card_name} ({card_rarity})")
             try:
                 # Use asyncio to run the async scraping function
                 price_data = asyncio.run(
@@ -563,6 +575,7 @@ class PriceScrapingService:
                 
                 # Save to cache if successful
                 if price_data and not price_data.get('error'):
+                    logger.info(f"✓ Successfully scraped price for {card_number} - saving to cache")
                     full_price_data = {
                         "card_number": card_number,
                         "card_name": card_name,
@@ -570,6 +583,8 @@ class PriceScrapingService:
                         **price_data
                     }
                     self.save_price_data(full_price_data, art_variant)
+                else:
+                    logger.warning(f"Price scraping failed for {card_number}: {price_data.get('error', 'Unknown error')}")
                 
                 return {
                     "success": not bool(price_data.get('error')),
@@ -583,7 +598,7 @@ class PriceScrapingService:
                 }
                 
             except Exception as e:
-                logger.error(f"Error scraping price: {e}")
+                logger.error(f"Error scraping price for {card_number}: {e}")
                 return {
                     "success": False,
                     "card_number": card_number,
