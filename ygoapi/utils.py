@@ -390,6 +390,10 @@ def is_cache_fresh(last_updated: datetime, cache_days: int = 7) -> bool:
     if not last_updated:
         return False
     
+    # Ensure last_updated is timezone-aware (assume UTC if naive)
+    if last_updated.tzinfo is None:
+        last_updated = last_updated.replace(tzinfo=UTC)
+    
     # Calculate expiry time
     expiry_time = last_updated + timedelta(days=cache_days)
     current_time = datetime.now(UTC)
