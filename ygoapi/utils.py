@@ -634,3 +634,57 @@ def map_set_code_to_tcgplayer_name(set_code: str) -> Optional[str]:
         }
         
         return fallback_mappings.get(set_code.upper())
+
+
+def filter_cards_by_set(cards_list: List[Dict], target_set_name: str) -> List[Dict]:
+    """
+    Filter cards to only include variants from the target set.
+    
+    Args:
+        cards_list: List of card dictionaries from YGO API
+        target_set_name: Name of the set to filter by
+        
+    Returns:
+        List of filtered card dictionaries with only relevant set variants
+    """
+    if not cards_list or not target_set_name:
+        return cards_list
+    
+    filtered_cards = []
+    target_set_name_lower = target_set_name.lower().strip()
+    
+    for card in cards_list:
+        # Create a copy of the card to avoid modifying the original
+        filtered_card = card.copy()
+        
+        # Filter the card_sets array to only include the target set
+        if 'card_sets' in card and isinstance(card['card_sets'], list):
+            filtered_sets = []
+            
+            for card_set in card['card_sets']:
+                set_name = card_set.get('set_name', '').lower().strip()
+                
+                # Check if this set matches the target set
+                if set_name == target_set_name_lower:
+                    filtered_sets.append(card_set)
+            
+            # Only include the card if it has variants in the target set
+            if filtered_sets:
+                filtered_card['card_sets'] = filtered_sets
+                
+                # Update card images to match the number of variants in the target set
+                if 'card_images' in filtered_card and len(filtered_sets) < len(filtered_card['card_images']):
+                    # Keep only as many images as we have set variants
+                    filtered_card['card_images'] = filtered_card['card_images'][:len(filtered_sets)]
+                
+                # Add set-specific metadata
+                filtered_card['target_set_variants'] = len(filtered_sets)
+                filtered_card['target_set_name'] = target_set_name
+                
+                # Extract set codes for easy reference
+                set_codes = [cs.get('set_code', '') for cs in filtered_sets]
+                filtered_card['target_set_codes'] = set_codes
+                
+                filtered_cards.append(filtered_card)
+    
+    return filtered_cards

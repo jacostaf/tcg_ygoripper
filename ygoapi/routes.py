@@ -330,20 +330,87 @@ def register_routes(app: Flask) -> None:
     @app.route('/card-sets/<string:set_name>/cards', methods=['GET'])
     @monitor_memory
     def get_cards_from_specific_set(set_name: str):
-        """Get all cards from a specific set."""
+        """Get all cards from a specific set, filtered to only show variants from that set."""
         try:
-            cards = card_variant_service.fetch_cards_from_set(set_name)
-            return jsonify({
-                "success": True,
-                "data": cards,
-                "set_name": set_name,
-                "count": len(cards)
-            })
+            # Get optional query parameters
+            filter_by_set = request.args.get('filter_by_set', 'true').lower() == 'true'
+            include_set_code = request.args.get('include_set_code', 'false').lower() == 'true'
+            
+            # First get unfiltered cards to track total count
+            from urllib.parse import quote
+            import requests
+            from .config import YGO_API_BASE_URL
+            
+            # URL encode the set name for the API call
+            encoded_set_name = quote(set_name)
+            
+            # Make request to YGO API for cards in this set
+            logger.info(f"Fetching cards from set: {set_name}")
+            api_url = f"{YGO_API_BASE_URL}/cardinfo.php?cardset={encoded_set_name}"
+            response = requests.get(api_url, timeout=15)
+            
+            if response.status_code == 200:
+                cards_data = response.json()
+                cards_list = cards_data.get('data', [])
+                
+                logger.info(f"Retrieved {len(cards_list)} cards from YGO API for {set_name}")
+                
+                # Filter cards by set if requested (default: true)
+                if filter_by_set:
+                    from .utils import filter_cards_by_set
+                    filtered_cards = filter_cards_by_set(cards_list, set_name)
+                else:
+                    filtered_cards = cards_list
+                
+                # Get set code if requested  
+                set_code_info = {}
+                if include_set_code:
+                    # This would need to be implemented if needed
+                    pass
+                
+                logger.info(f"Returning {len(filtered_cards)} filtered cards from {set_name}")
+                
+                response_data = {
+                    "success": True,
+                    "set_name": set_name,
+                    "data": filtered_cards,
+                    "card_count": len(filtered_cards),
+                    "total_cards_before_filter": len(cards_list),
+                    "message": f"Successfully fetched {len(filtered_cards)} cards from {set_name}",
+                    "filtered_by_set": filter_by_set
+                }
+                
+                # Add set code info if requested
+                if set_code_info:
+                    response_data.update(set_code_info)
+                
+                return jsonify(response_data)
+                
+            elif response.status_code == 400:
+                return jsonify({
+                    "success": False,
+                    "set_name": set_name,
+                    "error": "No cards found for this set or invalid set name",
+                    "card_count": 0,
+                    "data": []
+                }), 404
+            else:
+                return jsonify({
+                    "success": False,
+                    "set_name": set_name,
+                    "error": f"API returned status {response.status_code}",
+                    "card_count": 0,
+                    "data": []
+                }), 500
+                
         except Exception as e:
             logger.error(f"Error getting cards from set {set_name}: {e}")
             return jsonify({
                 "success": False,
-                "error": "Internal server error"
+                "set_name": set_name,
+                "error": "Internal server error",
+                "card_count": 0,
+                "data": []
             }), 500
     
     @app.route('/card-sets/fetch-all-cards', methods=['POST'])

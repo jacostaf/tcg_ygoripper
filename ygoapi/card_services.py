@@ -29,7 +29,8 @@ from .utils import (
     extract_art_version,
     normalize_rarity,
     batch_process_generator,
-    get_current_utc_datetime
+    get_current_utc_datetime,
+    filter_cards_by_set
 )
 from .memory_manager import monitor_memory, get_memory_manager
 
@@ -216,13 +217,13 @@ class CardVariantService:
     @monitor_memory
     def fetch_cards_from_set(self, set_name: str) -> List[Dict[str, Any]]:
         """
-        Fetch cards from a specific set using YGO API.
+        Fetch cards from a specific set using YGO API and filter by set.
         
         Args:
             set_name: Name of the set
             
         Returns:
-            List[Dict]: List of cards in the set
+            List[Dict]: List of cards filtered to only include variants from the set
         """
         try:
             # URL encode the set name
@@ -230,11 +231,21 @@ class CardVariantService:
             
             # Make request to YGO API
             api_url = f"{YGO_API_BASE_URL}/cardinfo.php?cardset={encoded_set_name}"
+            logger.info(f"Fetching cards from set: {set_name}")
             response = requests.get(api_url, timeout=15)
             
             if response.status_code == 200:
                 cards_data = response.json()
-                return cards_data.get('data', [])
+                cards_list = cards_data.get('data', [])
+                
+                logger.info(f"Retrieved {len(cards_list)} cards from YGO API for {set_name}")
+                
+                # Filter cards to only include variants from the target set
+                filtered_cards = filter_cards_by_set(cards_list, set_name)
+                
+                logger.info(f"Returning {len(filtered_cards)} filtered cards from {set_name}")
+                return filtered_cards
+                
             elif response.status_code == 400:
                 # No cards found for this set
                 logger.warning(f"No cards found for set: {set_name}")
