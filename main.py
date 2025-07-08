@@ -1187,14 +1187,20 @@ def lookup_card_name_from_ygo_api(card_number: str) -> Optional[str]:
     """Lookup card name from YGO API using the card number."""
     try:
         # Try to search by card number first
-        api_url = f"{YGO_API_BASE_URL}/cardinfo.php?misc=yes&num={quote(card_number)}"
+        api_url = f"{YGO_API_BASE_URL}/cardsetsinfo.php?setcode={quote(card_number)}"
         response = requests.get(api_url, timeout=10)
+        #logger.debug(f"here\n\n\n\n{response}\n\n\n\n")
         
         if response.status_code == 200:
             cards_data = response.json()
+            #logger.debug(f"here\n\n\n\n{cards_data}")
             cards_list = cards_data.get('data', [])
-            
+            #logger.debug(cards_list)
             # Look for exact card number match in card sets
+            card_name = cards_data.get('name')
+            if card_name:
+                logger.info(f"Found card name '{card_name}' for card number {card_number} via YGO API")
+                return card_name.strip()
             for card in cards_list:
                 card_sets = card.get('card_sets', [])
                 for card_set in card_sets:
