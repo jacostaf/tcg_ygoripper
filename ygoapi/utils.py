@@ -141,6 +141,86 @@ def normalize_rarity(rarity: str) -> str:
             normalized = full_name
             break
     
+    # Handle special cases for quarter century variations
+    if 'quarter century' in normalized or '25th anniversary' in normalized:
+        if 'secret' in normalized:
+            return 'quarter century secret rare'
+        elif 'ultra' in normalized:
+            return 'quarter century ultra rare'
+        elif 'rare' in normalized:
+            return 'quarter century rare'
+    
+    # Handle Platinum variations
+    if 'platinum' in normalized:
+        if 'secret' in normalized:
+            return 'platinum secret rare'
+        return 'platinum rare'
+    
+    # Handle Prismatic variations  
+    if 'prismatic' in normalized:
+        if 'secret' in normalized:
+            return 'prismatic secret rare'
+        elif 'collector' in normalized:
+            return "prismatic collector's rare"
+        elif 'ultimate' in normalized:
+            return 'prismatic ultimate rare'
+    
+    # Special handling for Starlight Rare
+    if 'starlight' in normalized:
+        return 'starlight rare'
+    
+    # Special handling for Collector's Rare
+    if 'collector' in normalized:
+        return "collector's rare"
+    
+    # Special handling for Ghost Rare variants
+    if 'ghost' in normalized:
+        if 'gold' in normalized:
+            return 'ghost/gold rare'
+        return 'ghost rare'
+    
+    # Special handling for Parallel Rare variants
+    if 'parallel' in normalized:
+        if 'ultra' in normalized:
+            return 'ultra parallel rare'
+        elif 'secret' in normalized:
+            return 'parallel secret rare'
+        return 'parallel rare'
+    
+    # Special handling for Gold Rare variants
+    if 'gold' in normalized:
+        if 'premium' in normalized:
+            return 'premium gold rare'
+        return 'gold rare'
+    
+    # Special handling for Duel Terminal Rare
+    if 'duel terminal' in normalized:
+        return 'duel terminal rare'
+    
+    # Special handling for Mosaic Rare
+    if 'mosaic' in normalized:
+        return 'mosaic rare'
+    
+    # Special handling for Shatterfoil Rare
+    if 'shatterfoil' in normalized:
+        return 'shatterfoil rare'
+    
+    # Special handling for Starfoil Rare
+    if 'starfoil' in normalized:
+        return 'starfoil rare'
+    
+    # Special handling for Hobby League Rare
+    if 'hobby league' in normalized:
+        return 'hobby league rare'
+    
+    # Special handling for Millennium Rare
+    if 'millennium' in normalized:
+        return 'millennium rare'
+    
+    # Special handling for 20th Secret Rare
+    if '20th' in normalized and 'secret' in normalized:
+        return '20th secret rare'
+    
     return normalized
 
 @monitor_memory
@@ -238,6 +318,88 @@ def normalize_rarity_for_matching(rarity: str) -> List[str]:
     if '20th' in normalized and 'secret' in normalized:
         variants.extend([
             '20th secret rare'
+        ])
+    
+    # Handle Collector's Rare variants
+    if 'collector' in normalized:
+        variants.extend([
+            "collector's rare",
+            'collectors rare',
+            'cr',
+            'collector',
+            'collectors'
+        ])
+    
+    # Handle Parallel Rare variants
+    if 'parallel' in normalized:
+        if 'ultra' in normalized:
+            variants.extend([
+                'ultra parallel rare',
+                'upr'
+            ])
+        elif 'secret' in normalized:
+            variants.extend([
+                'parallel secret rare',
+                'secret parallel rare',
+                'scpr'
+            ])
+        else:
+            variants.extend([
+                'parallel rare',
+                'npr'
+            ])
+    
+    # Handle Gold Rare variants
+    if 'gold' in normalized:
+        if 'premium' in normalized:
+            variants.extend([
+                'premium gold rare',
+                'pgr'
+            ])
+        elif 'ghost' in normalized:
+            variants.extend([
+                'ghost/gold rare',
+                'ghost gold rare'
+            ])
+        else:
+            variants.extend([
+                'gold rare',
+                'gld'
+            ])
+    
+    # Handle Duel Terminal variants
+    if 'duel terminal' in normalized:
+        variants.extend([
+            'duel terminal rare',
+            'dtr'
+        ])
+    
+    # Handle Mosaic Rare variants
+    if 'mosaic' in normalized:
+        variants.extend([
+            'mosaic rare',
+            'msr'
+        ])
+    
+    # Handle Shatterfoil Rare variants
+    if 'shatterfoil' in normalized:
+        variants.extend([
+            'shatterfoil rare',
+            'sfr'
+        ])
+    
+    # Handle Starfoil Rare variants
+    if 'starfoil' in normalized:
+        variants.extend([
+            'starfoil rare',
+            'str'  # Note: this conflicts with starlight rare, but both use same abbreviation
+        ])
+    
+    # Handle Hobby League Rare variants
+    if 'hobby league' in normalized:
+        variants.extend([
+            'hobby league rare',
+            'hlr'
         ])
     
     # Handle Extra Secret Rare (OCG)
@@ -531,12 +693,26 @@ def map_rarity_to_tcgplayer_filter(rarity: str) -> Optional[str]:
         'collector\'s rare': 'Collector\'s Rare',
         'collectors rare': 'Collector\'s Rare',
         'ghost rare': 'Ghost Rare',
+        'ghost/gold rare': 'Ghost/Gold Rare',
         'gold rare': 'Gold Rare',
         'premium gold rare': 'Premium Gold Rare',
         'prismatic secret rare': 'Prismatic Secret Rare',
         'prismatic ultimate rare': 'Prismatic Ultimate Rare',
+        'prismatic collector\'s rare': 'Prismatic Collector\'s Rare',
         'ultimate rare': 'Ultimate Rare',
-        'starfoil rare': 'Starfoil Rare'
+        'starfoil rare': 'Starfoil Rare',
+        'parallel rare': 'Parallel Rare',
+        'ultra parallel rare': 'Ultra Parallel Rare',
+        'parallel secret rare': 'Parallel Secret Rare',
+        'duel terminal rare': 'Duel Terminal Rare',
+        'mosaic rare': 'Mosaic Rare',
+        'shatterfoil rare': 'Shatterfoil Rare',
+        'hobby league rare': 'Hobby League Rare',
+        'millennium rare': 'Millennium Rare',
+        '20th secret rare': '20th Secret Rare',
+        'quarter century ultra rare': 'Quarter Century Ultra Rare',
+        'quarter century rare': 'Quarter Century Rare',
+        'platinum rare': 'Platinum Rare'
     }
     
     tcgplayer_rarity = rarity_mappings.get(rarity_lower)

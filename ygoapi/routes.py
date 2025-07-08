@@ -6,13 +6,17 @@ All route handlers are organized here with proper error handling and logging.
 """
 
 import logging
-from flask import Flask, jsonify, request
+import time
+import requests
+from flask import Flask, jsonify, request, Response
 from typing import Dict, Any
+from urllib.parse import unquote
 
 from .card_services import card_set_service, card_variant_service, card_lookup_service
 from .price_scraping import price_scraping_service
 from .memory_manager import get_memory_stats, force_memory_cleanup, monitor_memory
 from .utils import extract_art_version, clean_card_data
+from .config import API_RATE_LIMIT_DELAY, YGO_API_BASE_URL
 
 logger = logging.getLogger(__name__)
 
@@ -534,6 +538,136 @@ def register_routes(app: Flask) -> None:
             return jsonify({
                 'success': False,
                 'error': str(e)
+            }), 500
+    
+    # Rate limiting storage for image proxy
+    last_image_request_time = {"time": 0}
+    
+    @app.route('/api/image/proxy', methods=['GET'])
+    @monitor_memory
+    def proxy_card_image():
+        """
+        Proxy images from YGO API to avoid CORS issues and provide rate limiting.
+        
+        Query parameters:
+        - url: The image URL to proxy (must be from db.ygoprodeck.com)
+        """
+        try:
+            image_url = request.args.get('url')
+            if not image_url:
+                return jsonify({
+                    "success": False,
+                    "error": "Missing 'url' parameter"
+                }), 400
+            
+            # Decode URL if it's encoded
+            image_url = unquote(image_url)
+            
+            # Security check: only allow YGO API images
+            if not image_url.startswith(('https://images.ygoprodeck.com/', 'http://images.ygoprodeck.com/')):
+                return jsonify({
+                    "success": False,
+                    "error": "Only YGO API images are allowed"
+                }), 403
+            
+            # Rate limiting: ensure minimum delay between image requests
+            current_time = time.time()
+            time_since_last = current_time - last_image_request_time["time"]
+            if time_since_last < API_RATE_LIMIT_DELAY:
+                time.sleep(API_RATE_LIMIT_DELAY - time_since_last)
+            
+            last_image_request_time["time"] = time.time()
+            
+            # Fetch the image from YGO API
+            response = requests.get(image_url, timeout=10, stream=True)
+            
+            if response.status_code == 200:
+                # Determine content type
+                content_type = response.headers.get('content-type', 'image/jpeg')
+                
+                # Create response with proper headers
+                def generate():
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            yield chunk
+                
+                return Response(
+                    generate(),
+                    content_type=content_type,
+                    headers={
+                        'Cache-Control': 'public, max-age=86400',  # Cache for 24 hours
+                        'Access-Control-Allow-Origin': '*',
+                        'Access-Control-Allow-Methods': 'GET',
+                        'Access-Control-Allow-Headers': 'Content-Type'
+                    }
+                )
+            else:
+                return jsonify({
+                    "success": False,
+                    "error": f"Failed to fetch image: HTTP {response.status_code}"
+                }), response.status_code
+                
+        except requests.exceptions.Timeout:
+            return jsonify({
+                "success": False,
+                "error": "Timeout fetching image"
+            }), 504
+        except Exception as e:
+            logger.error(f"Error proxying image: {e}")
+            return jsonify({
+                "success": False,
+                "error": "Internal server error"
+            }), 500
+
+    @app.route('/api/cards/image/<int:card_id>', methods=['GET'])
+    @monitor_memory
+    def get_card_image_by_id(card_id: int):
+        """
+        Get card image URL by card ID with built-in proxy option.
+        
+        Query parameters:
+        - proxy: If 'true', returns proxied URL through this server
+        - size: 'small', 'normal', or 'cropped' (default: 'normal')
+        """
+        try:
+            proxy_enabled = request.args.get('proxy', 'false').lower() == 'true'
+            size = request.args.get('size', 'normal').lower()
+            
+            # Construct YGO API image URL based on size
+            if size == 'small':
+                image_url = f"https://images.ygoprodeck.com/images/cards_small/{card_id}.jpg"
+            elif size == 'cropped':
+                image_url = f"https://images.ygoprodeck.com/images/cards_cropped/{card_id}.jpg"
+            else:  # normal
+                image_url = f"https://images.ygoprodeck.com/images/cards/{card_id}.jpg"
+            
+            if proxy_enabled:
+                # Return proxied URL
+                from urllib.parse import quote
+                proxied_url = f"/api/image/proxy?url={quote(image_url)}"
+                return jsonify({
+                    "success": True,
+                    "card_id": card_id,
+                    "image_url": proxied_url,
+                    "direct_url": image_url,
+                    "proxy_enabled": True,
+                    "size": size
+                })
+            else:
+                # Return direct URL
+                return jsonify({
+                    "success": True,
+                    "card_id": card_id,
+                    "image_url": image_url,
+                    "proxy_enabled": False,
+                    "size": size
+                })
+                
+        except Exception as e:
+            logger.error(f"Error getting card image for ID {card_id}: {e}")
+            return jsonify({
+                "success": False,
+                "error": "Failed to get card image URL"
             }), 500
     
     @app.errorhandler(404)
