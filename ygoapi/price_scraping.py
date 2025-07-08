@@ -7,6 +7,7 @@ This module provides synchronous price scraping functionality with memory optimi
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timedelta, UTC
 from typing import Dict, List, Optional, Any, Tuple
 from playwright.async_api import async_playwright
@@ -406,7 +407,8 @@ class PriceScrapingService:
         self,
         card_name: str,
         card_rarity: str,
-        art_variant: Optional[str] = None
+        art_variant: Optional[str] = None,
+        card_number: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Price scraping from TCGPlayer using Playwright.
@@ -433,8 +435,40 @@ class PriceScrapingService:
                 )
                 page = await context.new_page()
                 
-                # Build search URL for TCGPlayer
-                search_url = f"https://www.tcgplayer.com/search/yugioh/product?Language=English&productLineName=yugioh&q={quote(card_name)}&view=grid"
+                # Build search URL for TCGPlayer  
+                search_card_name = card_name
+                
+                # Include art variant in search if provided
+                if art_variant:
+                    # Try to build a more specific search query with art variant
+                    art_search_terms = []
+                    
+                    # Handle numbered art variants (like "8", "7", "1st", etc.)
+                    if art_variant.isdigit():
+                        art_search_terms = [
+                            f"{card_name} {art_variant}th art",
+                            f"{card_name} {art_variant}th",
+                            f"{card_name} {art_variant}",
+                        ]
+                    elif art_variant.lower() in ["arkana", "kaiba", "joey wheeler", "pharaoh"]:
+                        # Handle named art variants
+                        art_search_terms = [
+                            f"{card_name} {art_variant}",
+                            f"{card_name}-{art_variant}",
+                        ]
+                    else:
+                        # Generic handling for other art variants
+                        art_search_terms = [
+                            f"{card_name} {art_variant}",
+                            f"{card_name} {art_variant} art",
+                        ]
+                    
+                    # Use the first art variant search term as our primary search
+                    if art_search_terms:
+                        search_card_name = art_search_terms[0]
+                        logger.info(f"Searching with art variant: '{search_card_name}' (original: '{card_name}', art: '{art_variant}')")
+                
+                search_url = f"https://www.tcgplayer.com/search/yugioh/product?Language=English&productLineName=yugioh&q={quote(search_card_name)}&view=grid"
                 
                 # Add rarity filter if available
                 if card_rarity:
@@ -473,7 +507,7 @@ class PriceScrapingService:
                 if not is_product_page:
                     # We're on search results, select best variant
                     best_variant_url = await self.select_best_tcgplayer_variant(
-                        page, None, card_name, card_rarity, art_variant
+                        page, card_number, card_name, card_rarity, art_variant
                     )
                     
                     if best_variant_url:
@@ -570,7 +604,7 @@ class PriceScrapingService:
             try:
                 # Use asyncio to run the async scraping function
                 price_data = asyncio.run(
-                    self.scrape_price_from_tcgplayer_basic(card_name, card_rarity, art_variant)
+                    self.scrape_price_from_tcgplayer_basic(card_name, card_rarity, art_variant, card_number)
                 )
                 
                 # Save to cache if successful
@@ -630,12 +664,17 @@ class PriceScrapingService:
         target_art_version: Optional[str],
         max_variants_to_process: int = None
     ) -> Optional[str]:
-        """Select best card variant from TCGPlayer search results."""
+        """Select best card variant from TCGPlayer search results with comprehensive art variant scoring."""
         if max_variants_to_process is None:
             max_variants_to_process = TCGPLAYER_DEFAULT_VARIANT_LIMIT
         
         try:
-            logger.info(f"Selecting best TCGPlayer variant for {card_name} ({card_rarity})")
+            logger.info("="*80)
+            logger.info("STARTING TCGPLAYER VARIANT SELECTION")
+            logger.info(f"Target Card Number: {card_number}")
+            logger.info(f"Target Rarity: {card_rarity}")
+            logger.info(f"Target Art Version: {target_art_version}")
+            logger.info("="*80)
             
             # Extract product links from TCGPlayer search results
             variants = await page.evaluate("""
@@ -654,6 +693,9 @@ class PriceScrapingService:
                         let rarity = '';
                         let cardNumber = '';
                         
+                        // Get title from the link text
+                        const title = link.textContent ? link.textContent.trim() : '';
+                        
                         // Extract from structured elements
                         const heading = link.querySelector('h4');
                         if (heading) {
@@ -668,6 +710,8 @@ class PriceScrapingService:
                                 cardNumber = text.replace('#', '').trim();
                             } else if (text.match(/quarter\\s+century\\s+secret\\s+rare/i)) {
                                 rarity = 'Quarter Century Secret Rare';
+                            } else if (text.match(/platinum\\s+secret\\s+rare/i)) {
+                                rarity = 'Platinum Secret Rare';
                             } else if (text.match(/secret\\s+rare/i)) {
                                 rarity = 'Secret Rare';
                             } else if (text.match(/ultra\\s+rare/i)) {
@@ -689,6 +733,7 @@ class PriceScrapingService:
                         
                         variants.push({
                             url: href.startsWith('http') ? href : 'https://www.tcgplayer.com' + href,
+                            title: title,
                             card_name: cardName,
                             set_name: setName,
                             rarity: rarity,
@@ -704,43 +749,106 @@ class PriceScrapingService:
                 logger.warning("No variants found")
                 return None
             
-            # Score and select best variant
-            best_variant = None
-            best_score = -1
+            # Score and select best variant with comprehensive scoring
+            scored_variants = []
             
             for variant in variants:
                 score = 0
+                title_lower = variant.get('title', '').lower()
+                url_lower = variant.get('url', '').lower()
                 
-                # Score by rarity match
+                logger.info(f"\\n--- Evaluating variant: {variant['title'][:100]}...")
+                
+                # Score by card number match (highest priority)
+                if card_number and variant.get('card_number'):
+                    if variant['card_number'].lower() == card_number.lower():
+                        score += 200
+                        logger.info(f"✓ EXACT card number match: {card_number}")
+                    elif card_number.lower() in variant['card_number'].lower():
+                        score += 100
+                        logger.info(f"✓ Partial card number match: {card_number}")
+                elif card_number and (card_number.lower() in title_lower or card_number.lower() in url_lower):
+                    score += 75
+                    logger.info(f"✓ Card number found in title/URL: {card_number}")
+                
+                # Score by rarity match (high priority)
                 if card_rarity and variant.get('rarity'):
                     if variant['rarity'].lower() == card_rarity.lower():
                         score += 100
+                        logger.info(f"✓ EXACT rarity match: {card_rarity}")
                     elif card_rarity.lower() in variant['rarity'].lower():
                         score += 50
+                        logger.info(f"✓ Partial rarity match: {card_rarity}")
+                    else:
+                        score -= 50
+                        logger.warning(f"✗ Rarity mismatch: {card_rarity} vs {variant['rarity']}")
                 
                 # Score by name match
                 if card_name and variant.get('card_name'):
                     if variant['card_name'].lower() == card_name.lower():
                         score += 100
+                        logger.info(f"✓ EXACT name match: {card_name}")
                     elif card_name.lower() in variant['card_name'].lower():
                         score += 50
+                        logger.info(f"✓ Partial name match: {card_name}")
                 
-                # Score by card number match
-                if card_number and variant.get('card_number'):
-                    if variant['card_number'] == card_number:
-                        score += 200
+                # Score for art variant match (CRITICAL for this bug fix)
+                if target_art_version:
+                    art_version_score = 0
+                    target_art = str(target_art_version).strip().lower()
+                    
+                    # Extract art variant from this variant's title and URL
+                    variant_art = extract_art_version(variant['title'])
+                    if not variant_art:
+                        variant_art = extract_art_version(variant['url'])
+                    
+                    if variant_art:
+                        variant_art_normalized = str(variant_art).strip().lower()
+                        # Remove ordinal suffixes for comparison
+                        target_art_clean = re.sub(r'(st|nd|rd|th)$', '', target_art)
+                        variant_art_clean = re.sub(r'(st|nd|rd|th)$', '', variant_art_normalized)
+                        
+                        if target_art_clean == variant_art_clean:
+                            # Exact art variant match - high score
+                            art_version_score = 100
+                            logger.info(f"✓ EXACT art variant match: '{target_art_version}' == '{variant_art}'")
+                        else:
+                            # Art variant mismatch - penalty
+                            art_version_score = -50
+                            logger.warning(f"✗ Art variant mismatch: '{target_art_version}' != '{variant_art}'")
+                    else:
+                        # No art variant found in title - check for basic presence in text
+                        if target_art in title_lower or target_art in url_lower:
+                            art_version_score = 25
+                            logger.info(f"⚠ Weak art variant match for '{target_art_version}' found in text")
+                        else:
+                            # No art variant info available - small penalty
+                            art_version_score = -10
+                            logger.info(f"⚠ No art variant info found for comparison")
+                    
+                    score += art_version_score
                 
-                if score > best_score:
-                    best_score = score
-                    best_variant = variant
+                # Small bonus for detailed titles
+                score += min(len(variant['title']) // 20, 5)
+                
+                scored_variants.append((score, variant))
+                logger.info(f"Final Score: {score} | Variant: {variant['title'][:80]}...")
             
-            if best_variant:
-                logger.info(f"Selected variant with score {best_score}: {best_variant['card_name']} ({best_variant['rarity']})")
+            # Sort by score and return the best match
+            scored_variants.sort(reverse=True, key=lambda x: x[0])
+            
+            if scored_variants and scored_variants[0][0] > 0:
+                best_variant = scored_variants[0][1]
+                best_score = scored_variants[0][0]
+                logger.info(f"\\n✓ SELECTED BEST VARIANT (Score: {best_score}): {best_variant['title'][:100]}...")
+                logger.info(f"URL: {best_variant['url']}")
                 return best_variant['url']
-            
-            # Fallback to first variant if no good match
-            logger.warning("No good variant match found, using first variant")
-            return variants[0]['url']
+            else:
+                logger.warning("No good variant match found, using first variant if available")
+                if variants:
+                    return variants[0]['url']
+                
+            return None
             
         except Exception as e:
             logger.error(f"Error selecting TCGPlayer variant: {e}")

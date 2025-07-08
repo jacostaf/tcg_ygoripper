@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 @monitor_memory
 def extract_art_version(card_name: str) -> Optional[str]:
     """
-    Extract art version from card name (e.g., "1st Art", "2nd Art").
+    Extract art version from card name using regex patterns for both numbered and named variants.
     
     Args:
         card_name: Card name to extract art version from
@@ -24,12 +24,47 @@ def extract_art_version(card_name: str) -> Optional[str]:
     Returns:
         Optional[str]: Art version if found, None otherwise
     """
-    # Pattern to match art versions like "1st Art", "2nd Art", "3rd Art", etc.
-    art_pattern = r'(\d+)(?:st|nd|rd|th)\s+Art'
+    if not card_name:
+        return None
     
-    match = re.search(art_pattern, card_name, re.IGNORECASE)
-    if match:
-        return f"{match.group(1)} Art"
+    # First, try numbered art variants
+    numbered_patterns = [
+        r'\[(\d+)(st|nd|rd|th)?\s*art\]',                         # "[9th Art]", "[7th art]"
+        r'\[(\d+)(st|nd|rd|th)?\s*quarter\s*century.*?\]',        # "[7th Quarter Century Secret Rare]" 
+        r'\[(\d+)(st|nd|rd|th)?\s*.*?secret.*?\]',                # "[7th Platinum Secret Rare]"
+        r'\[(\d+)(st|nd|rd|th)?\]',                               # "[7th]", "[1]"
+        r'\((\d+)(st|nd|rd|th)?\s*art\)',                         # "(7th art)", "(1st art)"
+        r'\b(\d+)(st|nd|rd|th)?\s*art\b',                         # "7th art", "1st artwork"
+        r'/(\d+)(st|nd|rd|th)?\-(?:quarter\-century|art)',        # "/7th-quarter-century", "/9th-art"
+        r'magician\-(\d+)(st|nd|rd|th)?\-',                       # "dark-magician-7th-quarter"
+        r'\-(\d+)(st|nd|rd|th)?\-(?:quarter|art)',                # "-7th-quarter", "-9th-art"
+    ]
+    
+    for pattern in numbered_patterns:
+        match = re.search(pattern, card_name, re.IGNORECASE)
+        if match:
+            art_version = match.group(1)
+            logger.debug(f"Detected numbered art version: {art_version} using pattern '{pattern}' in: {card_name}")
+            return art_version
+    
+    # Then, try named art variants (like "Arkana", "Joey Wheeler", etc.)
+    named_patterns = [
+        r'\b(arkana)\b',                                          # "arkana" (case insensitive)
+        r'\b(joey\s+wheeler)\b',                                  # "joey wheeler"
+        r'\b(kaiba)\b',                                           # "kaiba"
+        r'\b(pharaoh)\b',                                         # "pharaoh"
+        r'\b(anime)\b',                                           # "anime"
+        r'\b(manga)\b',                                           # "manga"
+        r'-([a-zA-Z]+(?:\s+[a-zA-Z]+)*)-',                       # Generic pattern for "-name-" format
+        r'\(([a-zA-Z]+(?:\s+[a-zA-Z]+)*)\)',                     # Generic pattern for "(name)" format
+    ]
+    
+    for pattern in named_patterns:
+        match = re.search(pattern, card_name, re.IGNORECASE)
+        if match:
+            art_version = match.group(1).strip().title()  # Capitalize properly
+            logger.debug(f"Detected named art version: '{art_version}' using pattern '{pattern}' in: {card_name}")
+            return art_version
     
     return None
 
