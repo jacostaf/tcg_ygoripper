@@ -235,9 +235,10 @@ def normalize_rarity_for_matching(rarity: str) -> List[str]:
         List[str]: List of normalized rarity variants
     """
     if not rarity:
-        return [""]
+        return []
     
-    normalized = normalize_rarity(rarity)
+    # Start with the simple lowercased version like the original implementation
+    normalized = rarity.lower().strip()
     variants = [normalized]
     
     # Handle Quarter Century variants
@@ -245,20 +246,16 @@ def normalize_rarity_for_matching(rarity: str) -> List[str]:
         if 'secret' in normalized:
             variants.extend([
                 'quarter century secret rare',
-                '25th anniversary secret rare',
                 'qcsr',
+                '25th anniversary secret rare',
                 'quarter century secret',
-                '25th secret rare',
-                '25th anniversary secret'
+                'qc secret rare'
             ])
         elif 'ultra' in normalized:
             variants.extend([
-                'quarter century ultra rare',
-                '25th anniversary ultra rare',
+                'quarter century ultra rare', 
                 'qcur',
-                'quarter century ultra',
-                '25th ultra rare',
-                '25th anniversary ultra'
+                '25th anniversary ultra rare'
             ])
     
     # Handle Platinum Secret Rare
@@ -266,35 +263,141 @@ def normalize_rarity_for_matching(rarity: str) -> List[str]:
         variants.extend([
             'platinum secret rare',
             'psr',
-            'platinum secret'
+            'plat secret rare'
         ])
     
-    # Handle Ghost Rare variants
-    if 'ghost' in normalized:
-        variants.extend([
-            'ghost rare',
-            'gr',
-            'ghost'
-        ])
+    # Handle Prismatic variants
+    if 'prismatic' in normalized:
+        if 'secret' in normalized:
+            variants.extend([
+                'prismatic secret rare',
+                'prismatic secret'
+            ])
+        elif 'collector' in normalized:
+            variants.extend([
+                'prismatic collector rare',
+                "prismatic collector's rare"
+            ])
+        elif 'ultimate' in normalized:
+            variants.extend([
+                'prismatic ultimate rare'
+            ])
     
-    # Handle Starlight Rare variants
+    # Handle Starlight Rare
     if 'starlight' in normalized:
         variants.extend([
             'starlight rare',
-            'str',
-            'stsr',
             'starlight'
         ])
     
-    # Handle Ultimate Rare variants
+    # Handle Collector's Rare
+    if 'collector' in normalized:
+        variants.extend([
+            "collector's rare",
+            'collector rare',
+            'collectors rare'
+        ])
+    
+    # Handle Ghost Rare
+    if 'ghost' in normalized:
+        if 'gold' in normalized:
+            variants.extend([
+                'ghost gold rare',
+                'ghost/gold rare'
+            ])
+        else:
+            variants.extend([
+                'ghost rare',
+                'ghost'
+            ])
+    
+    # Handle Ultimate Rare
     if 'ultimate' in normalized:
         variants.extend([
             'ultimate rare',
-            'ur',
             'ultimate'
         ])
     
-    # Handle Millennium variants
+    # Handle Parallel variants
+    if 'parallel' in normalized:
+        if 'ultra' in normalized:
+            variants.extend([
+                'ultra parallel rare',
+                'parallel ultra rare'
+            ])
+        elif 'secret' in normalized:
+            variants.extend([
+                'parallel secret rare'
+            ])
+        else:
+            variants.extend([
+                'parallel rare',
+                'parallel'
+            ])
+    
+    # Handle Gold variants
+    if 'gold' in normalized:
+        if 'premium' in normalized:
+            variants.extend([
+                'premium gold rare',
+                'premium gold'
+            ])
+        else:
+            variants.extend([
+                'gold rare',
+                'gold'
+            ])
+    
+    # Handle Platinum variants
+    if 'platinum' in normalized:
+        if 'secret' in normalized:
+            variants.extend([
+                'platinum secret rare',
+                'psr',
+                'plat secret rare'
+            ])
+        else:
+            variants.extend([
+                'platinum rare',
+                'platinum'
+            ])
+    
+    # Handle Duel Terminal Rare
+    if 'duel terminal' in normalized:
+        variants.extend([
+            'duel terminal rare',
+            'dt rare'
+        ])
+    
+    # Handle Mosaic Rare
+    if 'mosaic' in normalized:
+        variants.extend([
+            'mosaic rare',
+            'mosaic'
+        ])
+    
+    # Handle Shatterfoil Rare
+    if 'shatterfoil' in normalized:
+        variants.extend([
+            'shatterfoil rare',
+            'shatterfoil'
+        ])
+    
+    # Handle Starfoil Rare
+    if 'starfoil' in normalized:
+        variants.extend([
+            'starfoil rare',
+            'starfoil'
+        ])
+    
+    # Handle Hobby League Rare
+    if 'hobby league' in normalized:
+        variants.extend([
+            'hobby league rare',
+            'hl rare'
+        ])
+    
+    # Handle Millennium Rare
     if 'millennium' in normalized:
         variants.extend([
             'millennium rare',
@@ -320,88 +423,6 @@ def normalize_rarity_for_matching(rarity: str) -> List[str]:
             '20th secret rare'
         ])
     
-    # Handle Collector's Rare variants
-    if 'collector' in normalized:
-        variants.extend([
-            "collector's rare",
-            'collectors rare',
-            'cr',
-            'collector',
-            'collectors'
-        ])
-    
-    # Handle Parallel Rare variants
-    if 'parallel' in normalized:
-        if 'ultra' in normalized:
-            variants.extend([
-                'ultra parallel rare',
-                'upr'
-            ])
-        elif 'secret' in normalized:
-            variants.extend([
-                'parallel secret rare',
-                'secret parallel rare',
-                'scpr'
-            ])
-        else:
-            variants.extend([
-                'parallel rare',
-                'npr'
-            ])
-    
-    # Handle Gold Rare variants
-    if 'gold' in normalized:
-        if 'premium' in normalized:
-            variants.extend([
-                'premium gold rare',
-                'pgr'
-            ])
-        elif 'ghost' in normalized:
-            variants.extend([
-                'ghost/gold rare',
-                'ghost gold rare'
-            ])
-        else:
-            variants.extend([
-                'gold rare',
-                'gld'
-            ])
-    
-    # Handle Duel Terminal variants
-    if 'duel terminal' in normalized:
-        variants.extend([
-            'duel terminal rare',
-            'dtr'
-        ])
-    
-    # Handle Mosaic Rare variants
-    if 'mosaic' in normalized:
-        variants.extend([
-            'mosaic rare',
-            'msr'
-        ])
-    
-    # Handle Shatterfoil Rare variants
-    if 'shatterfoil' in normalized:
-        variants.extend([
-            'shatterfoil rare',
-            'sfr'
-        ])
-    
-    # Handle Starfoil Rare variants
-    if 'starfoil' in normalized:
-        variants.extend([
-            'starfoil rare',
-            'str'  # Note: this conflicts with starlight rare, but both use same abbreviation
-        ])
-    
-    # Handle Hobby League Rare variants
-    if 'hobby league' in normalized:
-        variants.extend([
-            'hobby league rare',
-            'hlr'
-        ])
-    
     # Handle Extra Secret Rare (OCG)
     if 'extra secret' in normalized:
         variants.extend([
@@ -409,30 +430,24 @@ def normalize_rarity_for_matching(rarity: str) -> List[str]:
         ])
     
     # Handle Red/Blue Secret Rare (OCG)
-    if 'red secret' in normalized:
+    if ('red' in normalized or 'blue' in normalized) and 'secret' in normalized:
         variants.extend([
-            'red secret rare'
+            'red secret rare' if 'red' in normalized else 'blue secret rare'
         ])
     
-    if 'blue secret' in normalized:
-        variants.extend([
-            'blue secret rare'
-        ])
-    
-    # Handle common abbreviations for standard rarities (CRITICAL - missing from current implementation!)
-    if 'secret rare' in normalized and 'quarter century' not in normalized and 'platinum' not in normalized and 'prismatic' not in normalized:
-        variants.extend(['secret', 'sr', 'scr'])
-    if 'ultra rare' in normalized and 'quarter century' not in normalized and 'prismatic' not in normalized:
-        variants.extend(['ultra', 'ur', 'ulr'])
+    # Handle common abbreviations for standard rarities
+    if 'secret rare' in normalized:
+        variants.extend(['secret', 'sr'])
+    if 'ultra rare' in normalized:
+        variants.extend(['ultra', 'ur'])
     if 'super rare' in normalized:
-        variants.extend(['super', 'spr'])
+        variants.extend(['super', 'sr'])
     if normalized == 'rare':
         variants.extend(['r'])
     if normalized == 'common':
         variants.extend(['c'])
     
-    # Remove duplicates and return
-    return list(set(variants))
+    return list(set(variants))  # Remove duplicates
 
 @monitor_memory
 def normalize_art_variant(art_variant: Optional[str]) -> Optional[str]:

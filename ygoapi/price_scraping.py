@@ -167,26 +167,78 @@ class PriceScrapingService:
                 logger.info("Database disabled, skipping rarity validation")
                 return True  # Allow validation to pass when database is disabled
             
-            # Get normalized rarity variants
-            rarity_variants = normalize_rarity_for_matching(card_rarity)
+            # First find the card with this set_code to get its card_name (like original implementation)
+            query = {"set_code": card_number}
+            card_document = self.variants_collection.find_one(query)
             
-            # Search for any matching variant
-            for variant in rarity_variants:
-                query = {
-                    "set_code": {"$regex": card_number, "$options": "i"},
-                    "set_rarity": {"$regex": variant, "$options": "i"}
-                }
+            if not card_document:
+                logger.warning(f"Card {card_number} not found in YGO_CARD_VARIANT_CACHE_V1")
+                # If card is not found in our database, allow the rarity (fallback)
+                return True
+            
+            # Get the card name to find all variants of this card
+            card_name = card_document.get('card_name')
+            if not card_name:
+                return True
+            
+            # Find all variants of this card to get available rarities
+            variants_query = {"card_name": card_name}
+            all_variants = self.variants_collection.find(variants_query)
+            
+            # Extract available rarities from all variants
+            available_rarities = set()
+            for variant in all_variants:
+                rarity = variant.get('set_rarity')
+                if rarity:
+                    available_rarities.add(rarity.lower().strip())
+            
+            # Normalize the requested rarity for comparison
+            normalized_requested = normalize_rarity(card_rarity)
+            
+            # Check if the normalized requested rarity matches any available rarity
+            for available_rarity in available_rarities:
+                normalized_available = normalize_rarity(available_rarity)
                 
-                if self.variants_collection.find_one(query):
-                    logger.info(f"Found matching rarity '{variant}' for card {card_number}")
+                # Check for exact match
+                if normalized_requested == normalized_available:
+                    logger.info(f"Rarity '{card_rarity}' validated for card {card_number}")
+                    return True
+                
+                # Check for special equivalences mentioned in the comment
+                if self._are_rarities_equivalent(normalized_requested, normalized_available):
+                    logger.info(f"Rarity '{card_rarity}' validated for card {card_number} (equivalent to '{available_rarity}')")
                     return True
             
             logger.warning(f"No matching rarity found for card {card_number} with rarity {card_rarity}")
+            logger.warning(f"Available rarities: {', '.join(sorted(available_rarities))}")
             return False
             
         except Exception as e:
             logger.error(f"Error validating card rarity: {e}")
             return False
+    
+    def _are_rarities_equivalent(self, rarity1: str, rarity2: str) -> bool:
+        """
+        Check if two rarities are equivalent based on special rules.
+        
+        Args:
+            rarity1: First rarity (normalized)
+            rarity2: Second rarity (normalized)
+            
+        Returns:
+            bool: True if rarities are equivalent
+        """
+        # Ultimate Rare and Prismatic Ultimate Rare should be treated the same
+        if ((rarity1 == 'ultimate rare' and rarity2 == 'prismatic ultimate rare') or
+            (rarity1 == 'prismatic ultimate rare' and rarity2 == 'ultimate rare')):
+            return True
+        
+        # Collector's Rare and Prismatic Collector's Rare should be treated the same
+        if ((rarity1 == "collector's rare" and rarity2 == "prismatic collector's rare") or
+            (rarity1 == "prismatic collector's rare" and rarity2 == "collector's rare")):
+            return True
+        
+        return False
     
     @monitor_memory
     def save_price_data(self, price_data: Dict[str, Any], requested_art_variant: Optional[str] = None) -> bool:
