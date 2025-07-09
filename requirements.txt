@@ -1,5 +1,5 @@
-# Production dependencies for YGO Card Sets API
-# Compatible with Python 3.8+ including Python 3.13
+# Production dependencies for YGO Card Sets API (Modular Version)
+# Compatible with Python 3.9+ including Python 3.13
 # 
 # Installation instructions:
 # 1. Create virtual environment: python -m venv venv
@@ -7,26 +7,47 @@
 # 3. Install: pip install -r requirements.txt
 # 4. Install playwright browsers: playwright install
 #
-# For Python 3.13 on macOS, you may need to install with:
-# pip install -r requirements.txt --upgrade
+# For Python 3.13, you may need to install with:
+# pip install -r requirements.txt --upgrade --pre
 
-# Web framework
+# Core Dependencies
+# =================
+
+# Web Framework
 flask>=2.3.3,<4.0.0
-# HTTP client for API requests
-requests>=2.31.0,<3.0.0
-# Environment variable loading
-python-dotenv>=1.0.0,<2.0.0
-# MongoDB driver with DNS-related support
-pymongo[srv]>=4.6.0,<5.0.0
-# Browser automation for price scraping
-playwright>=1.40.0,<2.0.0
-# Data validation and serialization
-pydantic>=2.5.0,<3.0.0
-# System and process monitoring for memory management
-psutil>=5.9.0
-# SSL/TLS certificate validation
-certifi>=2023.5.7
-# HTTP client library (dependency of requests)
-urllib3>=1.26.0,<3.0.0
-# OpenSSL bindings for Python
+flask-cors>=4.0.0,<5.0.0  # For handling CORS in the API
+
+# Database
+pymongo[srv]>=4.6.0,<5.0.0  # MongoDB driver with SRV support
+
+# Web Scraping & Automation
+playwright>=1.40.0,<2.0.0  # Browser automation for price scraping
+requests>=2.31.0,<3.0.0    # HTTP client for API requests
+
+# Data Processing & Validation
+pydantic>=2.5.0,<3.0.0     # Data validation and settings management
+python-dotenv>=1.0.0,<2.0.0  # Environment variable management
+
+# System & Performance
+psutil>=5.9.0              # System and process monitoring
+certifi>=2023.5.7          # SSL/TLS certificate validation
+typing-extensions>=4.7.0,<5.0.0  # Type hints support
+
+# Development Dependencies (included for completeness)
+# =======================
+# These are typically for development but included for compatibility
+
+# Testing
+pytest>=7.4.0,<8.0.0
+pytest-asyncio>=0.21.1,<0.22.0
+pytest-cov>=4.1.0,<5.0.0
+
+# Code Quality
+black>=23.7.0,<24.0.0
+flake8>=6.1.0,<7.0.0
+mypy>=1.5.0,<2.0.0
+
+# Documentation
+sphinx>=7.1.0,<8.0.0
+sphinx-rtd-theme>=1.3.0,<2.0.0
 pyOpenSSL>=23.0.0
