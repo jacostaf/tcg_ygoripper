@@ -8,6 +8,7 @@ This module replaces the original main.py file with a modular architecture.
 import logging
 import os
 from flask import Flask
+from flask_cors import CORS
 
 from .config import validate_config, get_port, get_debug_mode, get_log_level, ALLOW_START_WITHOUT_DATABASE
 from .database import test_database_connection
@@ -27,6 +28,15 @@ def create_app() -> Flask:
     
     # Create Flask app
     app = Flask(__name__)
+
+        # Enable CORS for all routes
+    CORS(app, resources={
+        r"/*": {
+            "origins": ["http://localhost:*", "http://127.0.0.1:*"],
+            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            "allow_headers": ["Content-Type", "Authorization"]
+        }
+    })
     
     # Configure logging
     log_level = getattr(logging, get_log_level())
