@@ -15,7 +15,7 @@ from urllib.parse import unquote
 from .card_services import card_set_service, card_variant_service, card_lookup_service
 from .price_scraping import price_scraping_service
 from .memory_manager import get_memory_stats, force_memory_cleanup, monitor_memory
-from .utils import extract_art_version, clean_card_data
+from .utils import extract_art_version, clean_card_data, extract_set_code, extract_booster_set_name
 from .config import API_RATE_LIMIT_DELAY, YGO_API_BASE_URL
 
 logger = logging.getLogger(__name__)
@@ -114,32 +114,59 @@ def register_routes(app: Flask) -> None:
             )
             
             # Format response to match original API format
-            response = {
-                "success": result.get('success', False),
+            # Create the data object that matches original implementation
+            data_object = {
                 "card_number": card_number or "",
                 "card_name": card_name or "",
                 "card_rarity": card_rarity,
-                "art_variant": art_variant or "",
-                "cached": result.get('cached', False),
-                "last_updated": result.get('last_updated', ''),
-                "tcgplayer_price": result.get('tcgplayer_price'),
-                "tcgplayer_market_price": result.get('tcgplayer_market_price'),
-                "tcgplayer_url": result.get('tcgplayer_url'),
-                "tcgplayer_product_id": result.get('tcgplayer_product_id'),
-                "tcgplayer_variant_selected": result.get('tcgplayer_variant_selected')
+                "set_code": extract_set_code(card_number) if card_number else None,
+                "booster_set_name": extract_booster_set_name(result.get('tcgplayer_url', '')) if result.get('tcgplayer_url') else None,
+                "tcg_price": result.get('tcgplayer_price'),
+                "tcg_market_price": result.get('tcgplayer_market_price'),
+                "source_url": result.get('tcgplayer_url'),
+                "scrape_success": result.get('success', False),
+                "last_price_updt": result.get('last_updated', ''),
             }
             
-            # Format last_updated to match original format
+            # Format last_price_updt to match original format
             if result.get('last_updated'):
                 last_updated = result['last_updated']
                 if hasattr(last_updated, 'strftime'):
-                    response['last_updated'] = last_updated.strftime("%a, %d %b %Y %H:%M:%S GMT")
+                    data_object['last_price_updt'] = last_updated.strftime("%a, %d %b %Y %H:%M:%S GMT")
                 else:
-                    response['last_updated'] = str(last_updated)
+                    data_object['last_price_updt'] = str(last_updated)
             
             # Add error if present
             if result.get('error'):
-                response['error'] = result['error']
+                data_object['error_message'] = result['error']
+            
+            # Calculate cache age if data is cached
+            cache_age_hours = 0.0
+            is_cached = result.get('cached', False)
+            message = "Price data scraped and saved successfully"
+            
+            if is_cached and result.get('last_updated'):
+                from datetime import datetime, UTC
+                try:
+                    last_updated = result['last_updated']
+                    if hasattr(last_updated, 'timestamp'):
+                        # It's already a datetime object
+                        current_time = datetime.now(UTC)
+                        cache_age = current_time - last_updated.replace(tzinfo=UTC) if last_updated.tzinfo is None else current_time - last_updated
+                        cache_age_hours = cache_age.total_seconds() / 3600
+                    message = "Price data retrieved from cache"
+                except Exception as e:
+                    logger.warning(f"Could not calculate cache age: {e}")
+                    cache_age_hours = 0.0
+            
+            # Build final response matching original format
+            response = {
+                "success": result.get('success', False),
+                "data": data_object,
+                "message": message,
+                "is_cached": is_cached,
+                "cache_age_hours": cache_age_hours
+            }
             
             if result.get('success'):
                 return jsonify(response)
