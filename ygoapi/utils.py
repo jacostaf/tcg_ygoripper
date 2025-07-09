@@ -419,6 +419,18 @@ def normalize_rarity_for_matching(rarity: str) -> List[str]:
             'blue secret rare'
         ])
     
+    # Handle common abbreviations for standard rarities (CRITICAL - missing from current implementation!)
+    if 'secret rare' in normalized and 'quarter century' not in normalized and 'platinum' not in normalized and 'prismatic' not in normalized:
+        variants.extend(['secret', 'sr', 'scr'])
+    if 'ultra rare' in normalized and 'quarter century' not in normalized and 'prismatic' not in normalized:
+        variants.extend(['ultra', 'ur', 'ulr'])
+    if 'super rare' in normalized:
+        variants.extend(['super', 'spr'])
+    if normalized == 'rare':
+        variants.extend(['r'])
+    if normalized == 'common':
+        variants.extend(['c'])
+    
     # Remove duplicates and return
     return list(set(variants))
 
