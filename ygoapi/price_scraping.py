@@ -73,11 +73,38 @@ class PriceScrapingService:
                 logger.info("Database connections disabled, price scraping will run in offline mode")
                 return
             
-            # Create indexes for better query performance
-            self.cache_collection.create_index("card_number", background=True)
-            self.cache_collection.create_index("card_name", background=True)
-            self.cache_collection.create_index("card_rarity", background=True)
-            self.cache_collection.create_index("last_price_updt", background=True)
+            # Get existing indexes
+            existing_indexes = {}
+            for idx in self.cache_collection.list_indexes():
+                # Convert the index key to a string for easier comparison
+                key = tuple(sorted([(k, v) for k, v in idx['key'].items() if k != '_id']))
+                existing_indexes[key] = idx['name']
+            
+            # Define the indexes we want (field name, unique, sparse, etc.)
+            desired_indexes = [
+                {'fields': [('card_number', 1)], 'name': 'card_number_idx'},
+                {'fields': [('card_name', 1)], 'name': 'card_name_idx'},
+                {'fields': [('card_rarity', 1)], 'name': 'card_rarity_idx'},
+                {'fields': [('last_price_updt', 1)], 'name': 'last_price_updt_idx'},
+                {'fields': [('card_number', 1), ('card_rarity', 1)], 'name': 'card_number_rarity_idx'}
+            ]
+            
+            # Create only the indexes that don't already exist
+            for idx_spec in desired_indexes:
+                # Convert fields to the format used in existing_indexes
+                fields = tuple(sorted(idx_spec['fields']))
+                
+                # Check if an index with these fields already exists
+                if fields not in existing_indexes:
+                    try:
+                        self.cache_collection.create_index(
+                            idx_spec['fields'],
+                            name=idx_spec['name'],
+                            background=True
+                        )
+                        logger.info(f"Created index {idx_spec['name']} on {idx_spec['fields']}")
+                    except Exception as e:
+                        logger.warning(f"Could not create index {idx_spec['name']}: {str(e)}")
             
             logger.info("Successfully initialized price scraping collections")
             
