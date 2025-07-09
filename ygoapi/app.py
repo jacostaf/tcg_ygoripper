@@ -85,6 +85,8 @@ def create_app() -> Flask:
 def run_app():
     """
     Run the Flask application.
+    In production, uses Waitress as the WSGI server.
+    In development, uses Flask's built-in server with debug mode.
     """
     app = create_app()
     port = get_port()
@@ -108,7 +110,15 @@ def run_app():
     print("  GET /memory/stats - Get memory usage statistics")
     print("  POST /memory/cleanup - Force memory cleanup")
     
-    app.run(host='0.0.0.0', port=port, debug=debug)
+    if debug:
+        # Use Flask's built-in server for development
+        app.run(host='0.0.0.0', port=port, debug=debug)
+    else:
+        # Use Waitress for production
+        from waitress import serve
+        print(f"Starting Waitress WSGI server on port {port}...")
+        print("Running in production mode (debug=False)")
+        serve(app, host='0.0.0.0', port=port, threads=4)
 
 if __name__ == '__main__':
     run_app()
