@@ -49,6 +49,9 @@ A comprehensive Flask API for fetching, caching, and managing Yu-Gi-Oh! card dat
    ```bash
    pip install -r requirements.txt
    ```
+   
+   **Having installation issues?** See [INSTALLATION.md](INSTALLATION.md) for troubleshooting guide, especially for Python 3.13 and macOS users.
+   ```
 
 4. **Configure environment variables**
    Create a `.env` file in the project root:

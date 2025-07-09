@@ -1,0 +1,29 @@
+# Locked requirements for exact reproducibility
+# Use this file if you need exact versions for CI/deployment
+# Install with: pip install -r requirements-lock.txt
+
+# Core dependencies
+flask==2.3.3
+requests==2.31.0
+python-dotenv==1.0.0
+pymongo[srv]==4.6.0
+playwright==1.40.0
+pydantic==2.5.0
+psutil==5.9.0
+certifi==2023.5.7
+urllib3==1.26.0
+pyOpenSSL==23.0.0
+
+# Sub-dependencies (for full reproducibility)
+Werkzeug==2.3.7
+Jinja2==3.1.2
+itsdangerous==2.1.2
+click==8.1.3
+blinker==1.6.2
+dnspython==2.6.1
+greenlet==3.0.1
+pyee==11.0.1
+annotated-types==0.6.0
+pydantic-core==2.14.1
+typing-extensions==4.8.0
+MarkupSafe==2.1.3
