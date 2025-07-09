@@ -543,14 +543,92 @@ def register_routes(app: Flask) -> None:
     # Rate limiting storage for image proxy
     last_image_request_time = {"time": 0}
     
-    @app.route('/api/image/proxy', methods=['GET'])
+    @app.route('/cards/image', methods=['GET'])
     @monitor_memory
-    def proxy_card_image():
+    def proxy_card_image_legacy():
         """
         Proxy images from YGO API to avoid CORS issues and provide rate limiting.
+        This is the legacy endpoint that matches the original main.py implementation.
         
         Query parameters:
-        - url: The image URL to proxy (must be from db.ygoprodeck.com)
+        - url: The image URL to proxy (must be from images.ygoprodeck.com)
+        """
+        try:
+            image_url = request.args.get('url')
+            if not image_url:
+                return jsonify({
+                    "success": False,
+                    "error": "Missing 'url' parameter"
+                }), 400
+            
+            # Decode URL if it's encoded
+            image_url = unquote(image_url)
+            
+            # Security check: only allow YGO API images
+            if not image_url.startswith(('https://images.ygoprodeck.com/', 'http://images.ygoprodeck.com/')):
+                return jsonify({
+                    "success": False,
+                    "error": "Only YGO API images are allowed"
+                }), 403
+            
+            # Rate limiting: ensure minimum delay between image requests
+            current_time = time.time()
+            time_since_last = current_time - last_image_request_time["time"]
+            if time_since_last < API_RATE_LIMIT_DELAY:
+                time.sleep(API_RATE_LIMIT_DELAY - time_since_last)
+            
+            last_image_request_time["time"] = time.time()
+            
+            # Fetch the image from YGO API
+            response = requests.get(image_url, timeout=10, stream=True)
+            
+            if response.status_code == 200:
+                # Determine content type
+                content_type = response.headers.get('content-type', 'image/jpeg')
+                
+                # Create response with proper headers
+                def generate():
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            yield chunk
+                
+                return Response(
+                    generate(),
+                    content_type=content_type,
+                    headers={
+                        'Cache-Control': 'public, max-age=86400',  # Cache for 24 hours
+                        'Access-Control-Allow-Origin': '*',
+                        'Access-Control-Allow-Methods': 'GET',
+                        'Access-Control-Allow-Headers': 'Content-Type'
+                    }
+                )
+            else:
+                return jsonify({
+                    "success": False,
+                    "error": f"Failed to fetch image: HTTP {response.status_code}"
+                }), response.status_code
+                
+        except requests.exceptions.Timeout:
+            return jsonify({
+                "success": False,
+                "error": "Timeout fetching image"
+            }), 504
+        except Exception as e:
+            logger.error(f"Error proxying image: {e}")
+            return jsonify({
+                "success": False,
+                "error": "Internal server error"
+            }), 500
+
+    @app.route('/api/image/proxy', methods=['GET'])
+    @monitor_memory
+    def proxy_card_image_new():
+        """
+        Proxy images from YGO API to avoid CORS issues and provide rate limiting.
+        This is the new API endpoint with enhanced functionality.
+        
+        Query parameters:
+        - url: The image URL to proxy (must be from images.ygoprodeck.com)
         """
         try:
             image_url = request.args.get('url')
