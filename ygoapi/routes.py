@@ -99,10 +99,11 @@ def register_routes(app: Flask) -> None:
             if not card_name and card_number:
                 card_name = price_scraping_service.lookup_card_name(card_number)
                 if not card_name:
-                    return jsonify({
-                        "success": False,
-                        "error": f"Could not find card name for card number: {card_number}"
-                    }), 404
+                    # In the original implementation, when card name lookup fails,
+                    # we continue with the scraping process using just the card number
+                    # and let the scraping service handle the fallback behavior
+                    logger.warning(f"Could not find card name for card number: {card_number}, continuing with scraping anyway")
+                    card_name = ""  # Continue with empty card name
             
             # Scrape price
             result = price_scraping_service.scrape_card_price(

@@ -215,7 +215,8 @@ class PriceScrapingService:
             
         except Exception as e:
             logger.error(f"Error validating card rarity: {e}")
-            return False
+            # Like the original implementation, return True on exception to allow fallback behavior
+            return True
     
     def _are_rarities_equivalent(self, rarity1: str, rarity2: str) -> bool:
         """
