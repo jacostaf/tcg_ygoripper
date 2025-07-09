@@ -32,7 +32,7 @@ def create_app() -> Flask:
         # Enable CORS for all routes
     CORS(app, resources={
         r"/*": {
-            "origins": ["http://localhost:*", "http://127.0.0.1:*"],
+            "origins": ["http://localhost:*", "http://127.0.0.1:*","*onrender*"],
             "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
             "allow_headers": ["Content-Type", "Authorization"]
         }
