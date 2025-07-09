@@ -30,7 +30,7 @@ fi
 
 # Run the modular application
 echo "=== Starting YGO API Modular Implementation... ==="
-python ygoapi/main_modular.py
+python main_modular.py
 
 # Check if the application started successfully
 if [ $? -eq 0 ]; then
