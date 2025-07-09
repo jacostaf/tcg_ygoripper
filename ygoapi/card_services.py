@@ -519,7 +519,7 @@ class CardLookupService:
     @monitor_memory
     def lookup_card_name_from_ygo_api(self, card_number: str) -> Optional[str]:
         """
-        Look up card name from YGO API.
+        Look up card name from YGO API using cardsetsinfo endpoint.
         
         Args:
             card_number: Card number to look up
@@ -528,27 +528,24 @@ class CardLookupService:
             Optional[str]: Card name if found
         """
         try:
-            # Try different API endpoints
-            endpoints = [
-                f"{YGO_API_BASE_URL}/cardinfo.php?num={card_number}",
-                f"{YGO_API_BASE_URL}/cardinfo.php?name={card_number}"
-            ]
+            # Use the correct cardsetsinfo endpoint as mentioned in the user's comment
+            api_url = f"{YGO_API_BASE_URL}/cardsetsinfo.php?setcode={quote(card_number)}"
+            response = requests.get(api_url, timeout=10)
             
-            for endpoint in endpoints:
-                try:
-                    response = requests.get(endpoint, timeout=10)
-                    if response.status_code == 200:
-                        data = response.json()
-                        cards = data.get('data', [])
-                        if cards:
-                            return cards[0].get('name')
-                except Exception:
-                    continue
+            if response.status_code == 200:
+                data = response.json()
+                
+                # The response is a single object, not an array
+                card_name = data.get('name')
+                if card_name:
+                    logger.info(f"Found card name '{card_name}' for card number {card_number} via YGO cardsetsinfo API")
+                    return card_name.strip()
             
+            logger.warning(f"Card {card_number} not found in YGO cardsetsinfo API")
             return None
             
         except Exception as e:
-            logger.error(f"Error looking up card name from API: {e}")
+            logger.error(f"Error looking up card name from cardsetsinfo API: {e}")
             return None
 
 # Service instances

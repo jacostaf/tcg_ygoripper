@@ -25,7 +25,8 @@ from .config import (
     TCGPLAYER_MAX_ACCEPTABLE_RESULTS,
     TCGPLAYER_DEFAULT_VARIANT_LIMIT,
     TCGPLAYER_EARLY_TERMINATION_SCORE,
-    TCGPLAYER_MIN_VARIANTS_BEFORE_EARLY_TERMINATION
+    TCGPLAYER_MIN_VARIANTS_BEFORE_EARLY_TERMINATION,
+    YGO_API_BASE_URL
 )
 from .database import get_price_cache_collection, get_card_variants_collection
 from .models import CardPriceModel, PriceScrapingRequest, PriceScrapingResponse
@@ -357,7 +358,7 @@ class PriceScrapingService:
     @monitor_memory
     def lookup_card_name_from_ygo_api(self, card_number: str) -> Optional[str]:
         """
-        Look up card name from YGO API as fallback.
+        Look up card name from YGO API as fallback using cardsetsinfo endpoint.
         
         Args:
             card_number: Card number to look up
@@ -366,27 +367,24 @@ class PriceScrapingService:
             Optional[str]: Card name if found
         """
         try:
-            # Try different API endpoints
-            endpoints = [
-                f"https://db.ygoprodeck.com/api/v7/cardinfo.php?num={card_number}",
-                f"https://db.ygoprodeck.com/api/v7/cardinfo.php?name={card_number}"
-            ]
+            # Use the correct cardsetsinfo endpoint as mentioned in the user's comment
+            api_url = f"{YGO_API_BASE_URL}/cardsetsinfo.php?setcode={quote(card_number)}"
+            response = requests.get(api_url, timeout=10)
             
-            for endpoint in endpoints:
-                try:
-                    response = requests.get(endpoint, timeout=10)
-                    if response.status_code == 200:
-                        data = response.json()
-                        cards = data.get('data', [])
-                        if cards:
-                            return cards[0].get('name')
-                except Exception:
-                    continue
+            if response.status_code == 200:
+                data = response.json()
+                
+                # The response is a single object, not an array
+                card_name = data.get('name')
+                if card_name:
+                    logger.info(f"Found card name '{card_name}' for card number {card_number} via YGO cardsetsinfo API")
+                    return card_name.strip()
             
+            logger.warning(f"Card {card_number} not found in YGO cardsetsinfo API")
             return None
             
         except Exception as e:
-            logger.error(f"Error looking up card name from API: {e}")
+            logger.error(f"Error looking up card name from cardsetsinfo API: {e}")
             return None
     
     @monitor_memory
