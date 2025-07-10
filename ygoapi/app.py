@@ -122,10 +122,10 @@ def run_app():
             app,
             host='0.0.0.0',
             port=port,
-            threads=3,  # Increased from 2 to 3 for better concurrency
+            threads=5,  # Increased from 2 to 3 for better concurrency
             connection_limit=30,
-            cleanup_interval=30,  # More frequent cleanup
-            channel_timeout=60,   # Timeout for idle connections
+            cleanup_interval=60,  # More frequent cleanup
+            channel_timeout=180,   # Timeout for idle connections
             asyncore_loop_timeout=1  # More responsive shutdown
         )
 
