@@ -55,12 +55,48 @@ class PriceScrapingService:
         self.cache_collection = None
         self.variants_collection = None
         self._initialized = False
+        self._browser = None
+        self._playwright = None
+        # Register cleanup callback with memory manager
+        self.memory_manager.register_cleanup_callback("price_scraper_cleanup", self.cleanup_playwright)
     
     def _ensure_initialized(self):
         """Ensure collections are initialized before use."""
         if not self._initialized:
             self._initialize_collections()
             self._initialized = True
+            
+    def cleanup_playwright(self):
+        """Force cleanup of Playwright resources."""
+        try:
+            if hasattr(self, '_browser') and self._browser:
+                try:
+                    self._browser.close()
+                except Exception as e:
+                    logger.warning(f"Error closing browser during cleanup: {e}")
+                finally:
+                    self._browser = None
+                    
+            if hasattr(self, '_playwright') and self._playwright:
+                try:
+                    self._playwright.stop()
+                except Exception as e:
+                    logger.warning(f"Error stopping Playwright during cleanup: {e}")
+                finally:
+                    self._playwright = None
+                    
+            # Force garbage collection
+            import gc
+            gc.collect()
+            
+            logger.info("Playwright resources cleaned up")
+            
+        except Exception as e:
+            logger.error(f"Error during Playwright cleanup: {e}")
+        finally:
+            # Ensure we don't leave any references
+            self._browser = None
+            self._playwright = None
     
     def _initialize_collections(self):
         """Initialize MongoDB collections for price scraping."""

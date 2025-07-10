@@ -114,11 +114,20 @@ def run_app():
         # Use Flask's built-in server for development
         app.run(host='0.0.0.0', port=port, debug=debug)
     else:
-        # Use Waitress for production
+        # Use Waitress for production with optimized settings
         from waitress import serve
         print(f"Starting Waitress WSGI server on port {port}...")
         print("Running in production mode (debug=False)")
-        serve(app, host='0.0.0.0', port=port, threads=4)
+        serve(
+            app,
+            host='0.0.0.0',
+            port=port,
+            threads=3,  # Increased from 2 to 3 for better concurrency
+            connection_limit=30,
+            cleanup_interval=30,  # More frequent cleanup
+            channel_timeout=60,   # Timeout for idle connections
+            asyncore_loop_timeout=1  # More responsive shutdown
+        )
 
 if __name__ == '__main__':
     run_app()
