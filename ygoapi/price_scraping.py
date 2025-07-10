@@ -149,22 +149,98 @@ class PriceScrapingService:
             self.cache_collection = None
             self.variants_collection = None
     
+    def _normalize_art_variant(self, art_variant: str) -> str:
+        """
+        Normalize art variant to handle numbered variants flexibly.
+        
+        Args:
+            art_variant: The art variant to normalize
+            
+        Returns:
+            str: Normalized art variant
+        """
+        if not art_variant:
+            return ""
+            
+        art_variant = art_variant.lower().strip()
+        
+        # Handle numbered variants (1st, 2nd, 3rd, etc.)
+        number_match = re.match(r'^(\d+)(?:st|nd|rd|th)?$', art_variant)
+        if number_match:
+            return number_match.group(1)  # Return just the number
+        
+        # Handle word numbers
+        number_words = {
+            'one': '1', 'two': '2', 'three': '3', 'four': '4', 'five': '5',
+            'six': '6', 'seven': '7', 'eight': '8', 'nine': '9', 'ten': '10',
+            'first': '1', 'second': '2', 'third': '3', 'fourth': '4', 'fifth': '5',
+            'sixth': '6', 'seventh': '7', 'eighth': '8', 'ninth': '9', 'tenth': '10'
+        }
+        
+        # Check for word numbers at the start of the string
+        for word, num in number_words.items():
+            if art_variant.startswith(word):
+                return num
+        
+        # Default to lowercase version
+        return art_variant
+
+    def _get_art_variant_alternatives(self, art_variant: str) -> List[str]:
+        """
+        Get alternative forms of an art variant for flexible matching.
+        
+        Args:
+            art_variant: The art variant to get alternatives for
+            
+        Returns:
+            List[str]: List of alternative forms of the art variant
+        """
+        if not art_variant:
+            return []
+            
+        normalized = self._normalize_art_variant(art_variant)
+        alternatives = {normalized}
+        
+        # Add ordinal forms if it's a number
+        if normalized.isdigit():
+            num = int(normalized)
+            if 1 <= num <= 10:
+                ordinals = ['th'] * 10
+                ordinals[0] = 'st'  # 1st
+                ordinals[1] = 'nd'  # 2nd
+                ordinals[2] = 'rd'  # 3rd
+                # 4th-10th handled by default 'th'
+                
+                alternatives.add(f"{num}{ordinals[num-1]}")
+                
+                # Add word forms for small numbers
+                number_words = {
+                    1: 'one', 2: 'two', 3: 'three', 4: 'four', 5: 'five',
+                    6: 'six', 7: 'seven', 8: 'eight', 9: 'nine', 10: 'ten'
+                }
+                if num in number_words:
+                    alternatives.add(number_words[num])
+                    alternatives.add(f"{number_words[num]}th")
+        
+        return list(alternatives)
+
     @monitor_memory
     def find_cached_price_data(
         self,
         card_number: str,
-        card_name: str,
+        card_name: str,  # Kept for backward compatibility but not used in query
         card_rarity: str,
         art_variant: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """
-        Find cached price data for a card.
+        Find cached price data for a card using card number, rarity, and art variant.
+        Handles numbered art variants flexibly (e.g., "7", "7th", "seven", "seventh").
         
         Args:
-            card_number: Card number
-            card_name: Card name
-            card_rarity: Card rarity
-            art_variant: Art variant (optional)
+            card_number: Card number (required)
+            card_name: Card name (for logging only)
+            card_rarity: Card rarity (case-insensitive)
+            art_variant: Art variant (optional, handles numbered variants flexibly)
             
         Returns:
             Optional[Dict]: Cached price data if found and fresh
@@ -172,41 +248,57 @@ class PriceScrapingService:
         try:
             self._ensure_initialized()
             
-            # Check if database is disabled
             if self.cache_collection is None:
                 logger.debug("Database disabled, skipping cache lookup")
                 return None
             
-            # Build query
+            # Normalize inputs
+            normalized_rarity = card_rarity.lower().strip()
+            normalized_art_variant = self._normalize_art_variant(art_variant) if art_variant else None
+            
+            logger.debug(f"Searching cache - Number: {card_number}, Rarity: {normalized_rarity}, "
+                        f"Art Variant: {normalized_art_variant or 'None'}")
+            
+            # Build base query with card number and rarity
             query = {
                 "card_number": card_number,
-                "card_name": card_name,
-                "card_rarity": card_rarity
+                "card_rarity": {"$regex": f"^{re.escape(normalized_rarity)}$", "$options": "i"}
             }
             
-            # Add art variant to query if provided
-            if art_variant is not None:
-                query["art_variant"] = art_variant
+            # Handle art variant if provided
+            if normalized_art_variant:
+                # Match either the exact variant or any document without an art variant
+                query["$or"] = [
+                    {"art_variant": {"$exists": False}},
+                    {"art_variant": ""},
+                    {"art_variant": {"$in": self._get_art_variant_alternatives(normalized_art_variant)}}
+                ]
             
-            logger.debug(f"Cache query: {query}")
+            # Find all matching documents
+            documents = list(self.cache_collection.find(query))
             
-            # Find document
-            document = self.cache_collection.find_one(query)
+            if not documents:
+                logger.info(f"No cached price data found for {card_number} (no matches)")
+                return None
+                
+            # Sort by last_price_updt in descending order to get the most recent
+            documents.sort(key=lambda x: x.get('last_price_updt', datetime.min.replace(tzinfo=UTC)), reverse=True)
             
-            if document:
-                # Check if cache is fresh
-                last_updated = document.get('last_price_updt')
-                if last_updated and is_cache_fresh(last_updated, PRICE_CACHE_EXPIRY_DAYS):
-                    logger.info(f"Found fresh cached price data for {card_number} (updated: {last_updated})")
-                    return document
-                else:
-                    logger.info(f"Found stale cached price data for {card_number} (updated: {last_updated})")
-                    logger.info(f"Cache expiry: {PRICE_CACHE_EXPIRY_DAYS} days")
+            # Get the most recent document
+            document = documents[0]
+            last_updated = document.get('last_price_updt')
+            
+            if not last_updated:
+                logger.info(f"Found cached data for {card_number} but missing last_price_updt")
+                return None
+                
+            if is_cache_fresh(last_updated, PRICE_CACHE_EXPIRY_DAYS):
+                logger.info(f"Found fresh cached price data for {card_number} (updated: {last_updated})")
+                return document
             else:
-                logger.info(f"No cached price data found for {card_number}")
-            
-            return None
-            
+                logger.info(f"Found stale cached price data for {card_number} (updated: {last_updated})")
+                return None
+                
         except Exception as e:
             logger.error(f"Error finding cached price data for {card_number}: {e}")
             return None
