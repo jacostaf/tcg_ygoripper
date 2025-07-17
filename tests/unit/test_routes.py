@@ -796,3 +796,276 @@ class TestFetchAllCardsEndpoint:
         assert "simplified" in data["message"]
         assert "statistics" in data
         assert data["statistics"]["total_sets"] == 0
+
+
+class TestErrorHandlingEnhancement:
+    """Test error handling paths that were previously uncovered."""
+
+    def test_scrape_card_price_invalid_json_content_type(self, client):
+        """Test price endpoint with invalid content type (lines 198-204)."""
+        response = client.post(
+            "/cards/price",
+            data="invalid json",
+            content_type="text/plain",
+        )
+
+        assert response.status_code == 400
+        data = response.get_json()
+        assert data["success"] is False
+        assert "Request body must be JSON" in data["error"]
+
+    def test_scrape_card_price_malformed_json(self, client):
+        """Test price endpoint with malformed JSON (lines 206-208)."""
+        response = client.post(
+            "/cards/price",
+            data="{ invalid json }",
+            content_type="application/json",
+        )
+
+        assert response.status_code == 400
+        data = response.get_json()
+        assert data["success"] is False
+        assert "Request body must be JSON" in data["error"]
+
+    def test_scrape_card_price_empty_request_body(self, client):
+        """Test price endpoint with empty request body (line 231)."""
+        response = client.post(
+            "/cards/price",
+            data=json.dumps(None),
+            content_type="application/json",
+        )
+
+        assert response.status_code == 400
+        data = response.get_json()
+        assert data["success"] is False
+        assert "Request body must be JSON" in data["error"]
+
+    @patch("ygoapi.routes.price_scraping_service")
+    def test_scrape_card_price_validation_error_classification(self, mock_service, client):
+        """Test price endpoint error classification (lines 461-476)."""
+        # Test "invalid" error -> 400
+        mock_service.validate_card_rarity.return_value = True
+        mock_service.lookup_card_name.return_value = "Blue-Eyes White Dragon"
+        mock_service.scrape_card_price.return_value = {
+            "success": False,
+            "error": "Invalid card rarity specified",
+            "cached": False
+        }
+
+        request_data = {"card_number": "LOB-001", "card_rarity": "Ultra Rare"}
+        response = client.post(
+            "/cards/price",
+            data=json.dumps(request_data),
+            content_type="application/json",
+        )
+
+        assert response.status_code == 400
+        data = response.get_json()
+        assert data["success"] is False
+
+    @patch("ygoapi.routes.price_scraping_service")
+    def test_scrape_card_price_not_found_error_classification(self, mock_service, client):
+        """Test price endpoint 404 error classification (lines 508-510)."""
+        mock_service.validate_card_rarity.return_value = True
+        mock_service.lookup_card_name.return_value = "Blue-Eyes White Dragon"
+        mock_service.scrape_card_price.return_value = {
+            "success": False,
+            "error": "Card not found in database",
+            "cached": False
+        }
+
+        request_data = {"card_number": "LOB-001", "card_rarity": "Ultra Rare"}
+        response = client.post(
+            "/cards/price",
+            data=json.dumps(request_data),
+            content_type="application/json",
+        )
+
+        assert response.status_code == 404
+        data = response.get_json()
+        assert data["success"] is False
+
+    @patch("ygoapi.routes.price_scraping_service")
+    def test_scrape_card_price_server_error_classification(self, mock_service, client):
+        """Test price endpoint 500 error classification (lines 533-535)."""
+        mock_service.validate_card_rarity.return_value = True
+        mock_service.lookup_card_name.return_value = "Blue-Eyes White Dragon"
+        mock_service.scrape_card_price.return_value = {
+            "success": False,
+            "error": "Database connection timeout",
+            "cached": False
+        }
+
+        request_data = {"card_number": "LOB-001", "card_rarity": "Ultra Rare"}
+        response = client.post(
+            "/cards/price",
+            data=json.dumps(request_data),
+            content_type="application/json",
+        )
+
+        assert response.status_code == 500
+        data = response.get_json()
+        assert data["success"] is False
+
+    def test_debug_cache_lookup_invalid_request_body(self, client):
+        """Test debug cache lookup with invalid request body (lines 317-319)."""
+        # Test the actual behavior when invalid JSON is sent
+        response = client.post(
+            "/debug/cache-lookup",
+            data="invalid json {",
+            content_type="application/json",
+        )
+
+        # The endpoint catches the exception and returns 500
+        assert response.status_code == 500
+        data = response.get_json()
+        assert data["success"] is False
+
+    def test_debug_cache_lookup_empty_request_body(self, client):
+        """Test debug cache lookup with empty request body (lines 339-341)."""
+        response = client.post(
+            "/debug/cache-lookup",
+            data=json.dumps(None),
+            content_type="application/json",
+        )
+
+        assert response.status_code == 400
+        data = response.get_json()
+        assert data["success"] is False
+        assert "Request body must be JSON" in data["error"]
+
+    @patch("ygoapi.routes.price_scraping_service")
+    def test_debug_cache_lookup_service_error(self, mock_service, client):
+        """Test debug cache lookup with service error (lines 356-358)."""
+        mock_service.get_cache_stats.side_effect = Exception("Database error")
+
+        request_data = {"card_number": "LOB-001"}
+        response = client.post(
+            "/debug/cache-lookup",
+            data=json.dumps(request_data),
+            content_type="application/json",
+        )
+
+        assert response.status_code == 500
+        data = response.get_json()
+        assert data["success"] is False
+
+    @patch("ygoapi.routes.card_set_service")
+    def test_card_sets_service_exceptions(self, mock_service, client):
+        """Test card sets endpoints with service exceptions."""
+        # Test fetch all card sets error
+        mock_service.fetch_all_card_sets.side_effect = Exception("API error")
+        response = client.get("/card-sets")
+        assert response.status_code == 500
+        data = response.get_json()
+        assert data["success"] is False
+        assert "Internal server error" in data["error"]
+
+        # Test search card sets error
+        mock_service.search_card_sets.side_effect = Exception("Search error")
+        response = client.get("/card-sets/search/test")
+        assert response.status_code == 500
+        data = response.get_json()
+        assert data["success"] is False
+
+        # Test upload card sets error
+        mock_service.upload_card_sets_to_cache.side_effect = Exception("Upload error")
+        response = client.post("/card-sets/upload")
+        assert response.status_code == 500
+        data = response.get_json()
+        assert data["success"] is False
+        assert "Internal server error during upload" in data["error"]
+
+    @patch("ygoapi.routes.card_variant_service")
+    def test_card_variants_service_exceptions(self, mock_service, client):
+        """Test card variants endpoints with service exceptions."""
+        # Test upload variants error
+        mock_service.upload_card_variants_to_cache.side_effect = Exception("Upload error")
+        response = client.post("/cards/upload-variants")
+        assert response.status_code == 500
+        data = response.get_json()
+        assert data["success"] is False
+        assert "Internal server error during variant upload" in data["error"]
+
+        # Test get variants error
+        mock_service.get_cached_card_variants.side_effect = Exception("Cache error")
+        response = client.get("/cards/variants")
+        assert response.status_code == 500
+        data = response.get_json()
+        assert data["success"] is False
+
+    @patch("ygoapi.routes.get_memory_stats")
+    def test_memory_endpoints_exceptions(self, mock_get_stats, client):
+        """Test memory endpoints with service exceptions."""
+        # Test memory stats error
+        mock_get_stats.side_effect = Exception("Memory error")
+        response = client.get("/memory/stats")
+        assert response.status_code == 500
+        data = response.get_json()
+        assert data["success"] is False
+
+        # Test memory cleanup error
+        with patch("ygoapi.routes.force_memory_cleanup") as mock_cleanup:
+            mock_cleanup.side_effect = Exception("Cleanup error")
+            response = client.post("/memory/cleanup")
+            assert response.status_code == 500
+            data = response.get_json()
+            assert data["success"] is False
+
+    @patch("ygoapi.routes.requests.get")
+    def test_image_proxy_http_errors(self, mock_get, client):
+        """Test image proxy with various HTTP errors."""
+        # Test 404 error
+        mock_response = Mock()
+        mock_response.status_code = 404
+        mock_get.return_value = mock_response
+
+        url = "https://images.ygoprodeck.com/images/cards/12345.jpg"
+        response = client.get(f"/cards/image?url={url}")
+        assert response.status_code == 404
+        data = response.get_json()
+        assert data["success"] is False
+        assert "Failed to fetch image" in data["error"]
+
+        # Test 500 error
+        mock_response.status_code = 500
+        response = client.get(f"/cards/image?url={url}")
+        assert response.status_code == 500
+        data = response.get_json()
+        assert data["success"] is False
+
+    @patch("ygoapi.routes.requests.get")
+    def test_cards_from_set_api_errors(self, mock_get, client):
+        """Test cards from set endpoint with API errors."""
+        # Test API 500 error
+        mock_response = Mock()
+        mock_response.status_code = 500
+        mock_get.return_value = mock_response
+
+        response = client.get("/card-sets/Test%20Set/cards")
+        assert response.status_code == 500
+        data = response.get_json()
+        assert data["success"] is False
+        assert "API returned status 500" in data["error"]
+
+        # Test network exception
+        mock_get.side_effect = Exception("Network error")
+        response = client.get("/card-sets/Test%20Set/cards")
+        assert response.status_code == 500
+        data = response.get_json()
+        assert data["success"] is False
+        assert "Internal server error" in data["error"]
+
+    def test_500_error_handler_trigger(self, client):
+        """Test that 500 error handler is properly configured."""
+        # This tests the error handler registration, not triggering it
+        # since Flask test client doesn't trigger error handlers the same way
+        from ygoapi.routes import register_routes
+        from flask import Flask
+        
+        test_app = Flask(__name__)
+        register_routes(test_app)
+        
+        # Verify error handler is registered
+        assert 500 in test_app.error_handler_spec[None]
+        assert 404 in test_app.error_handler_spec[None]

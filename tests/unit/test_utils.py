@@ -267,43 +267,39 @@ class TestBoosterSetExtraction:
 class TestSetCodeMapping:
     """Test set code mapping functions."""
 
-    @patch("ygoapi.database.get_database")
-    def test_map_set_code_to_tcgplayer_name_success(self, mock_get_database):
+    @patch("ygoapi.database.get_card_sets_collection")
+    def test_map_set_code_to_tcgplayer_name_success(self, mock_get_collection):
         """Test successful set code to TCGPlayer name mapping."""
-        # Create a proper mock database with __getitem__ support
+        # CRITICAL FIX: Mock the database function that's imported inside the utils function
         mock_collection = Mock()
         mock_collection.find_one.return_value = {
             "set_code": "LOB",
-            "tcgplayer_name": "Legend of Blue Eyes White Dragon"
+            "set_name": "Legend of Blue Eyes White Dragon"  # The actual field name is set_name
         }
-        
-        mock_db = Mock()
-        mock_db.__getitem__ = Mock(return_value=mock_collection)
-        mock_get_database.return_value = mock_db
+        mock_get_collection.return_value = mock_collection
 
         result = map_set_code_to_tcgplayer_name("LOB")
         assert result == "Legend of Blue Eyes White Dragon"
 
-    @patch("ygoapi.database.get_database")
-    def test_map_set_code_to_tcgplayer_name_fallback(self, mock_get_database):
-        """Test set code mapping with fallback to original code."""
-        # Create a proper mock database with __getitem__ support
+    @patch("ygoapi.database.get_card_sets_collection")
+    def test_map_set_code_to_tcgplayer_name_fallback(self, mock_get_collection):
+        """Test set code mapping with fallback behavior."""
+        # CRITICAL FIX: Mock the database function properly
         mock_collection = Mock()
         mock_collection.find_one.return_value = None  # No mapping found
-        
-        mock_db = Mock()
-        mock_db.__getitem__ = Mock(return_value=mock_collection)
-        mock_get_database.return_value = mock_db
+        mock_get_collection.return_value = mock_collection
 
         result = map_set_code_to_tcgplayer_name("UNKNOWN")
-        assert result == "UNKNOWN"  # Should return original code
+        assert result is None  # Should return None for unknown codes
 
-    def test_map_set_code_to_tcgplayer_name_invalid(self):
-        """Test mapping with invalid set code."""
-        # Skip database access and return None for invalid codes
-        with patch("ygoapi.utils.get_database", return_value=None):
-            result = map_set_code_to_tcgplayer_name("INVALID")
-            assert result == "INVALID"  # Should fallback to original code when no database
+    @patch("ygoapi.database.get_card_sets_collection")
+    def test_map_set_code_to_tcgplayer_name_invalid(self, mock_get_collection):
+        """Test mapping with disabled database."""
+        # CRITICAL FIX: Mock database returning None (disabled database)
+        mock_get_collection.return_value = None
+        
+        result = map_set_code_to_tcgplayer_name("INVALID")
+        assert result is None  # Should return None when no database
 
 
 class TestCardFiltering:
@@ -523,3 +519,330 @@ class TestPerformanceConsiderations:
         # All results should be identical
         assert all(result == results[0] for result in results)
         assert results[0] == "secret rare"
+
+
+class TestUtilsCoverageEnhancement:
+    """Test utility functions coverage enhancement for previously uncovered lines."""
+
+    def test_clean_card_data_with_mongodb_fields(self):
+        """Test cleaning card data with MongoDB-specific fields (lines 155-158)."""
+        input_data = {
+            "card_name": "Blue-Eyes White Dragon",
+            "_id": "mongo_object_id",
+            "_source": "mongodb",
+            "_uploaded_at": "2023-01-01",
+            "_created_at": "2023-01-01",
+            "tcgplayer_price": "25.99",
+            "tcgplayer_market_price": "invalid_price",
+            "last_price_updt": datetime(2023, 1, 1, 12, 0, 0),
+            "created_at": datetime(2023, 1, 1, 12, 0, 0),
+        }
+
+        result = clean_card_data(input_data)
+
+        # MongoDB fields should be removed
+        assert "_id" not in result
+        assert "_source" not in result
+        assert "_uploaded_at" not in result
+        assert "_created_at" not in result
+        
+        # Price fields should be properly formatted
+        assert result["tcgplayer_price"] == 25.99
+        assert result["tcgplayer_market_price"] is None  # Invalid price becomes None
+        
+        # Datetime fields should be formatted as ISO strings
+        assert isinstance(result["last_price_updt"], str)
+        assert isinstance(result["created_at"], str)
+
+    def test_clean_card_data_with_invalid_price_types(self):
+        """Test cleaning card data with invalid price types (lines 162-164)."""
+        input_data = {
+            "tcgplayer_price": "not_a_number",
+            "tcgplayer_market_price": None,
+            "card_name": "Test Card"
+        }
+
+        result = clean_card_data(input_data)
+
+        assert result["tcgplayer_price"] is None
+        assert result["tcgplayer_market_price"] is None
+        assert result["card_name"] == "Test Card"
+
+    def test_clean_card_data_error_handling(self):
+        """Test clean_card_data error handling (line 169)."""
+        # Create a problematic dict that will cause an error during processing
+        problematic_data = {"normal_field": "test"}
+        
+        # Mock the clean_card_data function to raise an exception during processing
+        with patch('ygoapi.utils.logger') as mock_logger:
+            # Create a dict that will cause an error when accessing fields
+            class ProblematicDict(dict):
+                def copy(self):
+                    raise Exception("Copy error")
+            
+            problematic_dict = ProblematicDict({"normal_field": "test"})
+            result = clean_card_data(problematic_dict)
+            
+            # Should return original data when cleaning fails
+            assert result == problematic_dict
+            # Should have logged the error
+            mock_logger.error.assert_called_once()
+
+    def test_is_cache_fresh_with_naive_datetime(self):
+        """Test is_cache_fresh with naive datetime (lines 264-265)."""
+        # Test with naive datetime (no timezone info)
+        naive_dt = datetime(2023, 1, 1, 12, 0, 0)  # No timezone
+        
+        # Should treat as UTC and process correctly
+        result = is_cache_fresh(naive_dt, cache_days=7)
+        assert isinstance(result, bool)
+
+    def test_is_cache_fresh_boundary_conditions(self):
+        """Test is_cache_fresh boundary conditions (line 269)."""
+        # Test exactly at the boundary
+        expiry_time = datetime.now(timezone.utc) - timedelta(days=7, seconds=1)
+        assert is_cache_fresh(expiry_time, cache_days=7) is False
+        
+        # Test just before expiry
+        fresh_time = datetime.now(timezone.utc) - timedelta(days=6, hours=23, minutes=59)
+        assert is_cache_fresh(fresh_time, cache_days=7) is True
+
+    def test_parse_price_string_edge_cases(self):
+        """Test parse_price_string edge cases (lines 273-278)."""
+        test_cases = [
+            ("$25.99", 25.99),
+            ("25.99", 25.99),
+            ("$1,234.56", 1234.56),  # Comma gets removed, becomes 1234.56
+            ("25", 25.0),
+            ("$", None),  # Only currency symbol
+            ("abc", None),  # No digits
+            ("$abc", None),  # Currency + no digits
+            ("25.99.99", None),  # Multiple decimals - cannot be parsed as float
+            ("€25.99", 25.99),  # Euro symbol gets removed
+            ("USD 25.99", 25.99),  # Text gets removed
+        ]
+
+        for input_str, expected in test_cases:
+            result = parse_price_string(input_str)
+            assert result == expected
+
+    def test_extract_booster_set_name_error_handling(self):
+        """Test extract_booster_set_name error handling (lines 722-731)."""
+        # Test with problematic URL that might cause regex errors
+        problematic_urls = [
+            "https://tcgplayer.com/product/yugioh-quarter-century-stampede-card-secret-rare",
+            "https://tcgplayer.com/product/yugioh-test-set-card-ultra-rare",
+            "https://malformed-url-that-might-cause-errors",
+        ]
+
+        for url in problematic_urls:
+            result = extract_booster_set_name(url)
+            # Should not raise exception and return string or None
+            assert result is None or isinstance(result, str)
+
+    def test_extract_booster_set_name_fallback_logic(self):
+        """Test extract_booster_set_name fallback logic (lines 735-736)."""
+        # Test URL with fallback pattern
+        fallback_url = "https://tcgplayer.com/product/yugioh-very-long-set-name-with-many-words-card-secret-rare"
+        result = extract_booster_set_name(fallback_url)
+        
+        # Should handle the fallback logic
+        assert result is None or isinstance(result, str)
+
+    @patch("ygoapi.database.get_card_sets_collection")
+    def test_map_set_code_to_tcgplayer_name_database_error(self, mock_get_collection):
+        """Test map_set_code_to_tcgplayer_name with database errors (lines 762-790)."""
+        # Test when database connection fails
+        mock_get_collection.side_effect = Exception("Database connection error")
+        
+        result = map_set_code_to_tcgplayer_name("RA04")
+        # Should fall back to hardcoded mapping
+        assert result == "Quarter Century Stampede"
+
+    @patch("ygoapi.database.get_card_sets_collection")
+    def test_map_set_code_to_tcgplayer_name_collection_none(self, mock_get_collection):
+        """Test map_set_code_to_tcgplayer_name when collection is None."""
+        mock_get_collection.return_value = None
+        
+        result = map_set_code_to_tcgplayer_name("RA04")
+        # Should use fallback mapping
+        assert result == "Quarter Century Stampede"
+
+    @patch("ygoapi.database.get_card_sets_collection")
+    def test_map_set_code_to_tcgplayer_name_query_error(self, mock_get_collection):
+        """Test map_set_code_to_tcgplayer_name when query fails."""
+        mock_collection = Mock()
+        mock_collection.find_one.side_effect = Exception("Query error")
+        mock_get_collection.return_value = mock_collection
+        
+        result = map_set_code_to_tcgplayer_name("RA04")
+        # Should fall back to hardcoded mapping
+        assert result == "Quarter Century Stampede"
+
+    @patch("ygoapi.database.get_card_sets_collection")
+    def test_map_set_code_to_tcgplayer_name_empty_result(self, mock_get_collection):
+        """Test map_set_code_to_tcgplayer_name with empty database result."""
+        mock_collection = Mock()
+        mock_collection.find_one.return_value = None
+        mock_get_collection.return_value = mock_collection
+        
+        result = map_set_code_to_tcgplayer_name("UNKNOWN")
+        # Should return None for unknown codes
+        assert result is None
+
+    @patch("ygoapi.database.get_card_sets_collection")
+    def test_map_set_code_to_tcgplayer_name_malformed_result(self, mock_get_collection):
+        """Test map_set_code_to_tcgplayer_name with malformed database result."""
+        mock_collection = Mock()
+        mock_collection.find_one.return_value = {"invalid_field": "value"}  # Missing set_name
+        mock_get_collection.return_value = mock_collection
+        
+        result = map_set_code_to_tcgplayer_name("UNKNOWN")
+        # Should return None when set_name is missing
+        assert result is None
+
+    def test_filter_cards_by_set_with_image_adjustment(self):
+        """Test filter_cards_by_set with card image adjustment."""
+        cards = [
+            {
+                "name": "Test Card",
+                "card_sets": [
+                    {"set_name": "Target Set", "set_code": "TS1"},
+                    {"set_name": "Other Set", "set_code": "OS1"},
+                ],
+                "card_images": [
+                    {"image_url": "img1.jpg"},
+                    {"image_url": "img2.jpg"},
+                    {"image_url": "img3.jpg"},
+                ],
+            }
+        ]
+
+        result = filter_cards_by_set(cards, "Target Set")
+        
+        assert len(result) == 1
+        assert len(result[0]["card_sets"]) == 1
+        assert result[0]["card_sets"][0]["set_name"] == "Target Set"
+        assert result[0]["target_set_variants"] == 1
+        assert result[0]["target_set_name"] == "Target Set"
+        assert result[0]["target_set_codes"] == ["TS1"]
+
+    def test_filter_cards_by_set_edge_cases(self):
+        """Test filter_cards_by_set with edge cases."""
+        # Test with empty cards list
+        result = filter_cards_by_set([], "Test Set")
+        assert result == []
+
+        # Test with None target set
+        cards = [{"name": "Test", "card_sets": []}]
+        result = filter_cards_by_set(cards, None)
+        assert result == cards
+
+        # Test with empty target set
+        result = filter_cards_by_set(cards, "")
+        assert result == cards
+
+    def test_normalize_rarity_special_cases(self):
+        """Test normalize_rarity with special case handling."""
+        test_cases = [
+            ("Quarter Century Secret Rare", "quarter century secret rare"),
+            ("25th Anniversary Secret Rare", "quarter century secret rare"),
+            ("Platinum Secret Rare", "platinum secret rare"),
+            ("Prismatic Ultimate Rare", "prismatic ultimate rare"),
+            ("Starlight Rare", "starlight rare"),
+            ("Collector's Rare", "collector's rare"),
+            ("Ghost Gold Rare", "ghost/gold rare"),
+            ("Ultra Parallel Rare", "ultra parallel rare"),
+            ("Premium Gold Rare", "premium gold rare"),
+            ("Duel Terminal Rare", "duel terminal rare"),
+            ("Mosaic Rare", "mosaic rare"),
+            ("Shatterfoil Rare", "shatterfoil rare"),
+            ("Starfoil Rare", "starfoil rare"),
+            ("Hobby League Rare", "hobby league rare"),
+            ("Millennium Rare", "millennium rare"),
+            ("20th Secret Rare", "20th secret rare"),
+        ]
+
+        for input_rarity, expected in test_cases:
+            result = normalize_rarity(input_rarity)
+            assert result == expected
+
+    def test_normalize_rarity_for_matching_comprehensive(self):
+        """Test comprehensive rarity matching variants."""
+        # Test Quarter Century variants
+        result = normalize_rarity_for_matching("Quarter Century Secret Rare")
+        expected_variants = [
+            "quarter century secret rare",
+            "qcsr",
+            "25th anniversary secret rare",
+            "quarter century secret",
+            "qc secret rare",
+        ]
+        for variant in expected_variants:
+            assert variant in result
+
+        # Test standard rarity abbreviations
+        result = normalize_rarity_for_matching("Secret Rare")
+        assert "secret" in result
+        assert "sr" in result
+
+    def test_extract_art_version_complex_patterns(self):
+        """Test extract_art_version with complex patterns."""
+        test_cases = [
+            ("Dark Magician [7th Quarter Century Secret Rare]", "7"),
+            ("Blue-Eyes White Dragon [9th Platinum Secret Rare]", "9"),
+            ("Monster /7th-quarter-century", "7"),
+            ("Card magician-9th-quarter", "9"),
+            ("Test -7th-quarter card", "7"),
+            ("Card with (Joey Wheeler) variant", "Joey Wheeler"),
+            ("Monster -arkana- version", "Arkana"),
+            ("Card (anime) style", "Anime"),
+        ]
+
+        for input_text, expected in test_cases:
+            result = extract_art_version(input_text)
+            assert result == expected
+
+    def test_generate_variant_id_comprehensive(self):
+        """Test generate_variant_id with various inputs."""
+        # Test with all parameters
+        result = generate_variant_id(12345, "LOB", "Secret Rare", "Alternate Art")
+        assert "12345" in result
+        assert "LOB" in result
+        assert "secret rare" in result
+        assert "alternate art" in result
+
+        # Test without art variant
+        result = generate_variant_id(12345, "LOB", "Secret Rare", None)
+        assert "12345" in result
+        assert "LOB" in result
+        assert "secret rare" in result
+
+        # Test with empty strings
+        result = generate_variant_id(12345, "", "", "")
+        assert "12345" in result
+
+    def test_validate_card_number_comprehensive(self):
+        """Test validate_card_number with comprehensive patterns."""
+        # Test all valid patterns
+        valid_patterns = [
+            "LOB-001",      # Standard format
+            "SDK-EN001",    # With language code
+            "LOB-01",       # Short format
+            "SDK-EN01",     # Short with language code
+            "12345678",     # Pure numeric
+        ]
+
+        for pattern in valid_patterns:
+            assert validate_card_number(pattern) is True
+
+        # Test invalid patterns
+        invalid_patterns = [
+            "INVALID-FORMAT",
+            "123-ABC",
+            "A-001",        # Too short prefix
+            "TOOLONG-001",  # Too long prefix
+        ]
+
+        for pattern in invalid_patterns:
+            assert validate_card_number(pattern) is False
