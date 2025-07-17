@@ -6,9 +6,10 @@ This script verifies that all required dependencies are installed
 and can be imported successfully.
 """
 
-import sys
 import importlib
+import sys
 import traceback
+
 
 def check_import(module_name, package_name=None):
     """Check if a module can be imported."""
@@ -20,11 +21,12 @@ def check_import(module_name, package_name=None):
         print(f"✗ {package_name or module_name}: {e}")
         return False
 
+
 def main():
     """Main verification function."""
     print("YGO Card Sets API - Installation Verification")
     print("=" * 50)
-    
+
     # Core dependencies
     dependencies = [
         ("flask", "Flask"),
@@ -38,41 +40,41 @@ def main():
         ("urllib3", "urllib3"),
         ("OpenSSL", "pyOpenSSL"),
     ]
-    
+
     print("\nChecking core dependencies:")
     print("-" * 30)
-    
+
     all_good = True
     for module, package in dependencies:
         if not check_import(module, package):
             all_good = False
-    
+
     # Check if the application can be created
     print("\nChecking application modules:")
     print("-" * 30)
-    
+
     try:
         # Check if our modules can be imported
         app_modules = [
             "ygoapi.config",
-            "ygoapi.models", 
+            "ygoapi.models",
             "ygoapi.utils",
             "ygoapi.memory_manager",
             "ygoapi.database",
             "ygoapi.card_services",
             "ygoapi.price_scraping",
             "ygoapi.routes",
-            "ygoapi.app"
+            "ygoapi.app",
         ]
-        
+
         for module in app_modules:
             if not check_import(module):
                 all_good = False
-                
+
     except Exception as e:
         print(f"✗ Error checking application modules: {e}")
         all_good = False
-    
+
     print("\n" + "=" * 50)
     if all_good:
         print("✓ All dependencies are installed and working!")
@@ -88,6 +90,7 @@ def main():
         print("2. Try: pip install -r requirements.txt --upgrade")
         print("3. For Python 3.13: pip install -r requirements.txt --upgrade --force-reinstall")
         return 1
+
 
 if __name__ == "__main__":
     sys.exit(main())

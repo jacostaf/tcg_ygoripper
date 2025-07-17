@@ -8,40 +8,41 @@ how it compares to the original main.py file.
 
 import os
 
+
 def analyze_modular_structure():
     """Analyze and document the modular structure."""
-    
+
     print("YGO API - Modular Structure Overview")
     print("=" * 50)
     print()
-    
+
     # Original structure
-    original_size = os.path.getsize('main.py')
+    original_size = os.path.getsize("main.py")
     print(f"📄 Original Structure:")
     print(f"   - main.py: {original_size:,} bytes (4170 lines)")
     print(f"   - Single monolithic file with all functionality")
     print()
-    
+
     # New modular structure
     print("📦 New Modular Structure:")
     print("   ygoapi/")
-    
+
     module_files = [
-        ('__init__.py', 'Package initialization'),
-        ('config.py', 'Configuration management and environment variables'),
-        ('memory_manager.py', 'Memory monitoring and MEM_LIMIT enforcement'),
-        ('models.py', 'Pydantic data models and structures'),
-        ('database.py', 'MongoDB connection management and pooling'),
-        ('utils.py', 'Utility functions for data processing'),
-        ('card_services.py', 'Card set and variant management services'),
-        ('price_scraping.py', 'TCGPlayer price scraping service'),
-        ('routes.py', 'Flask route handlers and API endpoints'),
-        ('app.py', 'Application initialization and configuration')
+        ("__init__.py", "Package initialization"),
+        ("config.py", "Configuration management and environment variables"),
+        ("memory_manager.py", "Memory monitoring and MEM_LIMIT enforcement"),
+        ("models.py", "Pydantic data models and structures"),
+        ("database.py", "MongoDB connection management and pooling"),
+        ("utils.py", "Utility functions for data processing"),
+        ("card_services.py", "Card set and variant management services"),
+        ("price_scraping.py", "TCGPlayer price scraping service"),
+        ("routes.py", "Flask route handlers and API endpoints"),
+        ("app.py", "Application initialization and configuration"),
     ]
-    
+
     total_modular_size = 0
     for filename, description in module_files:
-        filepath = f'ygoapi/{filename}'
+        filepath = f"ygoapi/{filename}"
         if os.path.exists(filepath):
             size = os.path.getsize(filepath)
             lines = len(open(filepath).readlines())
@@ -49,25 +50,25 @@ def analyze_modular_structure():
             print(f"   ├── {filename:<20} ({size:>5,} bytes, {lines:>3} lines) - {description}")
         else:
             print(f"   ├── {filename:<20} (missing) - {description}")
-    
+
     print(f"   └── Total: {total_modular_size:,} bytes")
     print()
-    
+
     # Additional files
     print("📋 Additional Files:")
     additional_files = [
-        ('main_modular.py', 'New main entry point using modular structure'),
-        ('test_modular.py', 'Testing script for modular components')
+        ("main_modular.py", "New main entry point using modular structure"),
+        ("test_modular.py", "Testing script for modular components"),
     ]
-    
+
     for filename, description in additional_files:
         if os.path.exists(filename):
             size = os.path.getsize(filename)
             lines = len(open(filename).readlines())
             print(f"   - {filename:<18} ({size:>4,} bytes, {lines:>3} lines) - {description}")
-    
+
     print()
-    
+
     # Key improvements
     print("🚀 Key Improvements:")
     improvements = [
@@ -78,14 +79,14 @@ def analyze_modular_structure():
         "Memory Optimization: Generators, batch processing, streaming",
         "Error Handling: Comprehensive error handling throughout",
         "Testing: Modular testing capability",
-        "Maintainability: Clear module boundaries and responsibilities"
+        "Maintainability: Clear module boundaries and responsibilities",
     ]
-    
+
     for improvement in improvements:
         print(f"   ✓ {improvement}")
-    
+
     print()
-    
+
     # Memory features
     print("🧠 Memory Management Features:")
     memory_features = [
@@ -96,14 +97,14 @@ def analyze_modular_structure():
         "Memory cleanup callbacks for services",
         "Context managers for resource cleanup",
         "Batch processing to limit memory growth",
-        "Generator-based data streaming"
+        "Generator-based data streaming",
     ]
-    
+
     for feature in memory_features:
         print(f"   ⚡ {feature}")
-    
+
     print()
-    
+
     # API endpoints preserved
     print("🌐 API Endpoints (All Preserved):")
     endpoints = [
@@ -121,14 +122,14 @@ def analyze_modular_structure():
         "POST /cards/upload-variants - Upload card variants",
         "GET /cards/variants - Get card variants",
         "GET /memory/stats - Memory usage statistics (NEW)",
-        "POST /memory/cleanup - Force memory cleanup (NEW)"
+        "POST /memory/cleanup - Force memory cleanup (NEW)",
     ]
-    
+
     for endpoint in endpoints:
         print(f"   🔗 {endpoint}")
-    
+
     print()
-    
+
     # Usage instructions
     print("📖 Usage Instructions:")
     print("   1. Set MEM_LIMIT environment variable (optional, default: 512MB)")
@@ -143,5 +144,6 @@ def analyze_modular_structure():
     print("   - MONGODB_CONNECTION_STRING: MongoDB connection")
     print()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     analyze_modular_structure()
