@@ -96,24 +96,61 @@ class PriceScrapingService:
     
     def _run_async_scraping_in_thread(self, card_name: str, card_rarity: str, art_variant: Optional[str], card_number: Optional[str]) -> Dict[str, Any]:
         """
-        Run async scraping in a dedicated thread with proper event loop handling.
+        Run async scraping in a dedicated thread with proper event loop handling and anti-detection measures.
         This prevents race conditions when multiple requests come in parallel.
         """
         try:
             logger.info(f"🔄 Starting threaded async scraping for {card_name} ({card_rarity})")
+            
+            # Add random delay to stagger parallel requests (anti-detection)
+            import random
+            import time
+            delay = random.uniform(0.5, 2.0)  # Random delay between 0.5-2 seconds
+            logger.info(f"⏱️ Adding stagger delay of {delay:.1f}s for {card_name}")
+            time.sleep(delay)
             
             # Create a new event loop for this thread
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             
             try:
-                # Run the async function in this thread's event loop
-                result = loop.run_until_complete(
-                    self.scrape_price_from_tcgplayer_basic(card_name, card_rarity, art_variant, card_number)
-                )
+                # Run the async function in this thread's event loop with retry logic
+                max_retries = 2
+                for attempt in range(max_retries):
+                    try:
+                        logger.info(f"🎯 Attempt {attempt + 1}/{max_retries} for {card_name}")
+                        result = loop.run_until_complete(
+                            self.scrape_price_from_tcgplayer_basic(card_name, card_rarity, art_variant, card_number)
+                        )
+                        
+                        # Check if we got valid price data
+                        if result.get('tcgplayer_price') is not None or result.get('tcgplayer_market_price') is not None:
+                            logger.info(f"✅ Threaded async scraping completed for {card_name}: {result.get('tcgplayer_price', 'No price')} / {result.get('tcgplayer_market_price', 'No market price')}")
+                            return result
+                        elif attempt < max_retries - 1:
+                            logger.warning(f"⚠️ Attempt {attempt + 1} returned null prices for {card_name}, retrying...")
+                            # Add delay before retry
+                            time.sleep(random.uniform(1.0, 3.0))
+                        else:
+                            logger.warning(f"⚠️ All attempts failed for {card_name}, returning result with null prices")
+                            return result
+                            
+                    except Exception as attempt_error:
+                        if attempt < max_retries - 1:
+                            logger.warning(f"⚠️ Attempt {attempt + 1} failed for {card_name}: {attempt_error}, retrying...")
+                            time.sleep(random.uniform(1.0, 3.0))
+                        else:
+                            raise attempt_error
                 
-                logger.info(f"✅ Threaded async scraping completed for {card_name}: {result.get('tcgplayer_price', 'No price')} / {result.get('tcgplayer_market_price', 'No market price')}")
-                return result
+                # This shouldn't be reached, but just in case
+                return {
+                    "tcgplayer_price": None,
+                    "tcgplayer_market_price": None,
+                    "tcgplayer_url": None,
+                    "tcgplayer_product_id": None,
+                    "tcgplayer_variant_selected": None,
+                    "error": "All retry attempts failed"
+                }
                 
             finally:
                 # Always close the loop when done
@@ -1397,8 +1434,14 @@ class PriceScrapingService:
     
     @monitor_memory
     async def extract_prices_from_tcgplayer_dom(self, page) -> Dict[str, Any]:
-        """Extract price data from TCGPlayer product page DOM."""
+        """Extract price data from TCGPlayer product page DOM with enhanced selectors."""
         try:
+            # First, let's debug what's actually on the page
+            page_title = await page.title()
+            current_url = page.url
+            logger.info(f"🔍 Extracting prices from: {current_url}")
+            logger.info(f"📄 Page title: {page_title}")
+            
             prices = await page.evaluate("""
                 () => {
                     const extractPrice = (text) => {
@@ -1414,10 +1457,33 @@ class PriceScrapingService:
                     const result = {
                         tcg_price: null,
                         tcg_market_price: null,
-                        debug_info: []
+                        debug_info: [],
+                        found_elements: []
                     };
                     
-                    // Look for Market Price in table rows
+                    // Enhanced selector strategy - look for multiple price patterns
+                    const priceSelectors = [
+                        // Table-based selectors
+                        'tr:has-text("Market Price") td',
+                        'tr:has-text("TCG Low") td', 
+                        'tr:has-text("Low Price") td',
+                        'tr:has-text("TCG Direct Low") td',
+                        // Direct price containers
+                        '[data-testid*="price"]',
+                        '[class*="price"]',
+                        '.price-container',
+                        '.price-point',
+                        '.market-price',
+                        '.tcg-low',
+                        '.low-price',
+                        // Button/link selectors that might contain prices
+                        'button:has-text("$")',
+                        'a:has-text("$")',
+                        // Generic containers with dollar signs
+                        '*:has-text("$")'
+                    ];
+                    
+                    // First, try table-based extraction (most reliable)
                     const marketPriceRows = Array.from(document.querySelectorAll('tr')).filter(row => {
                         const text = row.textContent?.toLowerCase() || '';
                         return text.includes('market price') && text.includes('$');
@@ -1435,6 +1501,7 @@ class PriceScrapingService:
                                 const price = extractPrice(priceCell.textContent);
                                 if (price !== null) {
                                     result.tcg_market_price = price;
+                                    result.debug_info.push(`Market price found in table: $${price}`);
                                     break;
                                 }
                             }
@@ -1444,7 +1511,7 @@ class PriceScrapingService:
                     }
                     
                     // Look for TCG Low/Low Price in table rows
-                    const tcgLowRows = Array.from(document.querySelectorAll('tr')).filter(row => {
+                    const tcgLowRows = Array.from(document.querySelectorAll('tr')).filter (row => {
                         const text = row.textContent?.toLowerCase() || '';
                         return (text.includes('tcg low') || text.includes('low price') || 
                                 text.includes('tcg direct low') || 
@@ -1466,6 +1533,7 @@ class PriceScrapingService:
                                 const price = extractPrice(priceCell.textContent);
                                 if (price !== null) {
                                     result.tcg_price = price;
+                                    result.debug_info.push(`TCG Low found in table: $${price}`);
                                     break;
                                 }
                             }
@@ -1474,27 +1542,78 @@ class PriceScrapingService:
                         if (result.tcg_price !== null) break;
                     }
                     
-                    // Fallback: search all elements for prices
+                    // Enhanced fallback: comprehensive price search
                     if (!result.tcg_market_price || !result.tcg_price) {
-                        const allElements = Array.from(document.querySelectorAll('*')).filter(el => {
+                        result.debug_info.push('Falling back to comprehensive price search...');
+                        
+                        // Find all elements containing dollar amounts
+                        const allElementsWithDollar = Array.from(document.querySelectorAll('*')).filter(el => {
+                            const text = el.textContent;
+                            if (!text || !text.includes('$')) return false;
+                            
                             const style = window.getComputedStyle(el);
-                            return style.display !== 'none' && style.visibility !== 'hidden' && 
-                                   el.offsetHeight > 0 && el.offsetWidth > 0 && el.textContent?.trim();
+                            return style.display !== 'none' && 
+                                   style.visibility !== 'hidden' && 
+                                   el.offsetHeight > 0 && 
+                                   el.offsetWidth > 0;
                         });
                         
-                        for (const element of allElements) {
+                        result.debug_info.push(`Found ${allElementsWithDollar.length} elements with $ symbol`);
+                        
+                        for (const element of allElementsWithDollar) {
                             const text = element.textContent?.toLowerCase() || '';
-                            if (text.includes('market price') && text.includes('$')) {
-                                const price = extractPrice(element.textContent);
-                                if (price !== null && result.tcg_market_price === null) {
+                            const fullText = element.textContent || '';
+                            
+                            // Look for market price patterns
+                            if (text.includes('market') && text.includes('price') && result.tcg_market_price === null) {
+                                const price = extractPrice(fullText);
+                                if (price !== null) {
                                     result.tcg_market_price = price;
+                                    result.debug_info.push(`Market price found in element: $${price} - "${text.substring(0, 50)}..."`);
                                 }
                             }
                             
-                            if (text.includes('tcg low') && text.includes('$')) {
-                                const price = extractPrice(element.textContent);
-                                if (price !== null && result.tcg_price === null) {
-                                    result.tcg_price = price;
+                            // Look for TCG Low patterns
+                            if ((text.includes('tcg') && text.includes('low')) || 
+                                (text.includes('low') && text.includes('price') && !text.includes('market')) ||
+                                text.includes('tcg direct low')) {
+                                if (result.tcg_price === null) {
+                                    const price = extractPrice(fullText);
+                                    if (price !== null) {
+                                        result.tcg_price = price;
+                                        result.debug_info.push(`TCG Low found in element: $${price} - "${text.substring(0, 50)}..."`);
+                                    }
+                                }
+                            }
+                            
+                            // Store element info for debugging
+                            if (element.tagName && (text.includes('price') || text.includes('market') || text.includes('low'))) {
+                                result.found_elements.push({
+                                    tag: element.tagName,
+                                    text: text.substring(0, 100),
+                                    classes: element.className
+                                });
+                            }
+                        }
+                        
+                        // Last resort: look for any price-like patterns in buttons/links
+                        if (!result.tcg_market_price && !result.tcg_price) {
+                            result.debug_info.push('Last resort: searching buttons and links...');
+                            
+                            const buttons = document.querySelectorAll('button, a, span');
+                            for (const btn of buttons) {
+                                const text = btn.textContent || '';
+                                if (text.includes('$')) {
+                                    const price = extractPrice(text);
+                                    if (price !== null) {
+                                        if (!result.tcg_price) {
+                                            result.tcg_price = price;
+                                            result.debug_info.push(`Price found in ${btn.tagName}: $${price}`);
+                                        } else if (!result.tcg_market_price && price !== result.tcg_price) {
+                                            result.tcg_market_price = price;
+                                            result.debug_info.push(`Market price found in ${btn.tagName}: $${price}`);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1504,10 +1623,28 @@ class PriceScrapingService:
                 }
             """)
             
-            return prices
+            # Log the debug information
+            if prices.get('debug_info'):
+                for debug_msg in prices['debug_info']:
+                    logger.info(f"💰 Price extraction: {debug_msg}")
+            
+            if prices.get('found_elements'):
+                logger.info(f"🔍 Found {len(prices['found_elements'])} price-related elements on page")
+                for elem in prices['found_elements'][:5]:  # Log first 5 elements
+                    logger.info(f"   📍 {elem['tag']}.{elem['classes']}: {elem['text'][:50]}...")
+            
+            # Log final results
+            tcg_price = prices.get('tcg_price')
+            tcg_market_price = prices.get('tcg_market_price')
+            logger.info(f"💵 Final extraction result - TCG Low: ${tcg_price}, Market: ${tcg_market_price}")
+            
+            return {
+                "tcg_price": tcg_price,
+                "tcg_market_price": tcg_market_price
+            }
             
         except Exception as e:
-            logger.error(f"Error extracting prices from TCGPlayer DOM: {e}")
+            logger.error(f"❌ Error extracting prices from TCGPlayer DOM: {e}", exc_info=True)
             return {"tcg_price": None, "tcg_market_price": None}
 
 # Global service instance
