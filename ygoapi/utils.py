@@ -962,7 +962,8 @@ def map_set_code_to_tcgplayer_name(set_code: str) -> Optional[str]:
                 'RA04': 'Quarter Century Stampede',
                 'RA03': 'Quarter Century Bonanza',
                 'SUDA': 'Supreme Darkness',
-                'BLTR': 'Battles of Legend: Terminal Revenge'
+                'BLTR': 'Battles of Legend: Terminal Revenge',
+               # 'BLMM': 'Battles of Legend: Monster Mayhem'
             }
             
             return fallback_mappings.get(set_code.upper())
@@ -982,7 +983,8 @@ def map_set_code_to_tcgplayer_name(set_code: str) -> Optional[str]:
                 'RA04': 'Quarter Century Stampede',
                 'RA03': 'Quarter Century Bonanza',
                 'SUDA': 'Supreme Darkness',
-                'BLTR': 'Battles of Legend: Terminal Revenge'
+                'BLTR': 'Battles of Legend: Terminal Revenge',
+               # 'BLMM': 'Battles of Legend: Monster Mayhem'
             }
             
             return fallback_mappings.get(set_code.upper())
@@ -993,7 +995,8 @@ def map_set_code_to_tcgplayer_name(set_code: str) -> Optional[str]:
             'RA04': 'Quarter Century Stampede',
             'RA03': 'Quarter Century Bonanza', 
             'SUDA': 'Supreme Darkness',
-            'BLTR': 'Battles of Legend: Terminal Revenge'
+            'BLTR': 'Battles of Legend: Terminal Revenge',
+           # 'BLMM': 'Battles of Legend: Monster Mayhem'
         }
         
         return fallback_mappings.get(set_code.upper())

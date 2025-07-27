@@ -650,6 +650,106 @@ class PriceScrapingService:
             return {}
     
     @monitor_memory
+    async def _wait_for_search_results(self, page, card_name: str, max_wait_seconds: int = 15) -> int:
+        """
+        Wait for TCGPlayer search results to load dynamically.
+        
+        TCGPlayer uses AJAX to load search results after the initial page load.
+        This method implements a polling mechanism to wait for results to appear.
+        
+        Args:
+            page: Playwright page object
+            card_name: Card name being searched (for logging)
+            max_wait_seconds: Maximum time to wait for results
+            
+        Returns:
+            int: Number of results found (0 if no results after waiting)
+        """
+        try:
+            start_time = asyncio.get_event_loop().time()
+            check_interval = 0.5  # Check every 500ms
+            
+            logger.info(f"⏳ Waiting for search results to load for '{card_name}'...")
+            
+            while True:
+                # Check current results count
+                results_count = await page.evaluate("""
+                    () => {
+                        // Try multiple selectors to find results count
+                        const selectors = [
+                            'h1', 
+                            '[data-testid="results-count"]',
+                            '.search-results-header',
+                            '.results-header'
+                        ];
+                        
+                        for (const selector of selectors) {
+                            const element = document.querySelector(selector);
+                            if (element) {
+                                const text = element.textContent || '';
+                                const match = text.match(/(\\d+)\\s+results?\\s+for/i);
+                                if (match) {
+                                    return parseInt(match[1]);
+                                }
+                            }
+                        }
+                        
+                        // Fallback: count visible product links
+                        const productLinks = document.querySelectorAll('a[href*="/product/"]');
+                        const visibleLinks = Array.from(productLinks).filter(link => {
+                            const rect = link.getBoundingClientRect();
+                            return rect.width > 0 && rect.height > 0;
+                        });
+                        
+                        return visibleLinks.length;
+                    }
+                """)
+                
+                elapsed_time = asyncio.get_event_loop().time() - start_time
+                
+                # If we found results, return immediately
+                if results_count > 0:
+                    logger.info(f"✅ Found {results_count} results after {elapsed_time:.1f}s")
+                    return results_count
+                
+                # If we've exceeded max wait time, give up
+                if elapsed_time >= max_wait_seconds:
+                    logger.warning(f"⏰ Timeout waiting for results after {elapsed_time:.1f}s")
+                    break
+                
+                # Log progress every few seconds
+                if int(elapsed_time) % 3 == 0 and elapsed_time > 0:
+                    logger.info(f"⏳ Still waiting for results... ({elapsed_time:.1f}s elapsed)")
+                
+                # Wait before next check
+                await asyncio.sleep(check_interval)
+            
+            # Final check for any content that might indicate results
+            final_check = await page.evaluate("""
+                () => {
+                    // Check for any product-related content
+                    const productElements = document.querySelectorAll([
+                        'a[href*="/product/"]',
+                        '[class*="product"]',
+                        '[data-testid*="product"]'
+                    ].join(','));
+                    
+                    return productElements.length;
+                }
+            """)
+            
+            if final_check > 0:
+                logger.info(f"📦 Found {final_check} product elements in final check")
+                return final_check
+            
+            logger.warning(f"❌ No results found for '{card_name}' after {max_wait_seconds}s")
+            return 0
+            
+        except Exception as e:
+            logger.error(f"Error waiting for search results: {e}")
+            return 0
+
+    @monitor_memory
     async def scrape_price_from_tcgplayer_basic(
         self,
         card_name: str,
@@ -664,6 +764,7 @@ class PriceScrapingService:
             card_name: Card name to search for
             card_rarity: Card rarity
             art_variant: Art variant (optional)
+            card_number: Card number (optional, used for set filtering)
             
         Returns:
             Dict: Scraped price data
@@ -723,62 +824,34 @@ class PriceScrapingService:
                     if tcgplayer_rarity_filter:
                         search_url += f"&Rarity={quote(tcgplayer_rarity_filter)}"
                 
+                # IMPROVED: Add set filtering when we have a card number to prevent cross-set contamination
+                if card_number:
+                    set_code = extract_set_code(card_number)
+                    if set_code:
+                        # Map set code to TCGPlayer set name for filtering
+                        tcgplayer_set_name = map_set_code_to_tcgplayer_name(set_code)
+                        if tcgplayer_set_name:
+                            search_url += f"&setName={quote(tcgplayer_set_name)}"
+                            logger.info(f"🎯 Added set filter for {set_code} -> {tcgplayer_set_name}")
+                        else:
+                            # Try to use the card number itself in the search query for better specificity
+                            search_card_name += f" {card_number}"
+                            search_url = f"https://www.tcgplayer.com/search/yugioh/product?Language=English&productLineName=yugioh&q={quote(search_card_name)}&view=grid"
+                            if card_rarity:
+                                tcgplayer_rarity_filter = map_rarity_to_tcgplayer_filter(card_rarity)
+                                if tcgplayer_rarity_filter:
+                                    search_url += f"&Rarity={quote(tcgplayer_rarity_filter)}"
+                            logger.info(f"🎯 Added card number to search query: {search_card_name}")
+                
                 logger.info(f"Searching TCGPlayer: {search_url}")
                 
                 await page.goto(search_url, wait_until='networkidle', timeout=60000)
                 
-                # FIXED: Wait for dynamic search results to load properly
-                # TCGPlayer loads results asynchronously, so we need to wait for them to appear
-                results_count = 0
-                max_wait_attempts = 12  # Wait up to ~12 seconds (12 * 1000ms)
-                wait_interval = 1000   # Check every 1 second
-                
-                for attempt in range(max_wait_attempts):
-                    # Check if we got results
-                    results_count = await page.evaluate("""
-                        () => {
-                            // Check multiple possible selectors for results count
-                            const selectors = [
-                                'h1', 
-                                '[data-testid="results-count"]',
-                                '.search-results-count',
-                                '.results-summary'
-                            ];
-                            
-                            for (const selector of selectors) {
-                                const element = document.querySelector(selector);
-                                if (element) {
-                                    const text = element.textContent || '';
-                                    const match = text.match(/(\\d+)\\s+results?\\s+for/i);
-                                    if (match) {
-                                        return parseInt(match[1]);
-                                    }
-                                }
-                            }
-                            
-                            // Also check if there are visible product links (alternative indicator of results)
-                            const productLinks = document.querySelectorAll('a[href*="/product/"]');
-                            const visibleLinks = Array.from(productLinks).filter(link => {
-                                const style = window.getComputedStyle(link);
-                                return style.display !== 'none' && style.visibility !== 'hidden' && 
-                                       link.offsetHeight > 0 && link.offsetWidth > 0;
-                            });
-                            
-                            return visibleLinks.length;
-                        }
-                    """)
-                    
-                    if results_count > 0:
-                        logger.info(f"✓ Found {results_count} results after {attempt + 1} attempts ({(attempt + 1) * wait_interval / 1000:.1f}s)")
-                        break
-                    
-                    # If this is not the last attempt, wait before trying again
-                    if attempt < max_wait_attempts - 1:
-                        logger.debug(f"Attempt {attempt + 1}: No results yet, waiting {wait_interval}ms before retry...")
-                        await page.wait_for_timeout(wait_interval)
+                # Wait for search results to load with retry mechanism
+                results_count = await self._wait_for_search_results(page, card_name)
                 
                 if results_count == 0:
-                    logger.warning(f"No results found for {card_name} after waiting {max_wait_attempts * wait_interval / 1000:.1f} seconds")
+                    logger.warning(f"No results found for {card_name}")
                     await browser.close()
                     return {
                         "tcgplayer_price": None,
