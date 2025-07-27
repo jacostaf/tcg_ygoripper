@@ -26,7 +26,10 @@ from .config import (
     TCGPLAYER_DEFAULT_VARIANT_LIMIT,
     TCGPLAYER_EARLY_TERMINATION_SCORE,
     TCGPLAYER_MIN_VARIANTS_BEFORE_EARLY_TERMINATION,
-    YGO_API_BASE_URL
+    YGO_API_BASE_URL,
+    PLAYWRIGHT_PAGE_TIMEOUT_MS,
+    PLAYWRIGHT_NAVIGATION_TIMEOUT_MS,
+    PLAYWRIGHT_DEFAULT_TIMEOUT_MS
 )
 from .database import get_price_cache_collection, get_card_variants_collection
 from .models import CardPriceModel, PriceScrapingRequest, PriceScrapingResponse
@@ -781,7 +784,16 @@ class PriceScrapingService:
                 context = await browser.new_context(
                     user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
                 )
+                
+                # Configure context timeouts to match our configuration
+                context.set_default_timeout(PLAYWRIGHT_DEFAULT_TIMEOUT_MS)
+                context.set_default_navigation_timeout(PLAYWRIGHT_NAVIGATION_TIMEOUT_MS)
+                
                 page = await context.new_page()
+                
+                # Set page-specific timeouts as well
+                page.set_default_timeout(PLAYWRIGHT_PAGE_TIMEOUT_MS)
+                page.set_default_navigation_timeout(PLAYWRIGHT_NAVIGATION_TIMEOUT_MS)
                 
                 # Build search URL for TCGPlayer  
                 search_card_name = card_name
@@ -845,7 +857,8 @@ class PriceScrapingService:
                 
                 logger.info(f"Searching TCGPlayer: {search_url}")
                 
-                await page.goto(search_url, wait_until='networkidle', timeout=60000)
+                # Use configured timeout for navigation
+                await page.goto(search_url, wait_until='networkidle', timeout=PLAYWRIGHT_NAVIGATION_TIMEOUT_MS)
                 
                 # Wait for search results to load with retry mechanism
                 results_count = await self._wait_for_search_results(page, card_name)
@@ -873,7 +886,8 @@ class PriceScrapingService:
                     
                     if best_variant_url:
                         logger.info(f"Selected best variant: {best_variant_url}")
-                        await page.goto(best_variant_url, wait_until='networkidle', timeout=60000)
+                        # Use configured timeout for navigation to variant page
+                        await page.goto(best_variant_url, wait_until='networkidle', timeout=PLAYWRIGHT_NAVIGATION_TIMEOUT_MS)
                     else:
                         logger.warning(f"No suitable variant found for {card_name}")
                         await browser.close()
@@ -1393,7 +1407,7 @@ class PriceScrapingService:
                     }
                     
                     // Look for TCG Low/Low Price in table rows
-                    const tcgLowRows = Array.from(document.querySelectorAll('tr')).filter(row => {
+                    const tcgLowRows = Array.from(document.querySelectorAll('tr')).filter row => {
                         const text = row.textContent?.toLowerCase() || '';
                         return (text.includes('tcg low') || text.includes('low price') || 
                                 text.includes('tcg direct low') || 
