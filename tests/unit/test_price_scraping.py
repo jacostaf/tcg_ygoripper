@@ -164,8 +164,13 @@ class TestPriceScrapingService:
             "last_price_updt": datetime.now(timezone.utc),
         }
 
+        # Mock the new staleness-aware cache method
         with patch.object(service, 'validate_card_rarity', return_value=True), \
-             patch.object(service, 'find_cached_price_data', return_value=cached_data):
+             patch.object(service, '_find_cached_price_data_with_staleness_info', return_value={
+                 "data": cached_data,
+                 "is_fresh": True,
+                 "last_updated": datetime.now(timezone.utc)
+             }):
 
             result = service.scrape_card_price("LOB-001", "Blue-Eyes White Dragon", "Ultra Rare")
 
@@ -188,11 +193,16 @@ class TestPriceScrapingService:
 
     def test_scrape_card_price_invalid_rarity(self, service):
         """Test card price scraping with invalid rarity."""
-        with patch.object(service, 'validate_card_rarity', return_value=False):
+        # Mock the new staleness-aware cache method to return no cache
+        with patch.object(service, '_find_cached_price_data_with_staleness_info', return_value=None), \
+             patch.object(service, 'validate_card_rarity', return_value=False):
+            
             result = service.scrape_card_price("LOB-001", "Blue-Eyes White Dragon", "Invalid Rarity")
 
+            # Should fail due to validation in the new implementation
             assert result["success"] is False
-            assert "rarity" in result["error"].lower()
+            assert "error" in result
+            assert "Invalid rarity" in result["error"]
 
     @patch("ygoapi.price_scraping.get_price_cache_collection")
     def test_save_price_to_cache_success(self, mock_get_collection, service):
