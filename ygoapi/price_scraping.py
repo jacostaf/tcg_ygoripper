@@ -1407,7 +1407,7 @@ class PriceScrapingService:
                     }
                     
                     // Look for TCG Low/Low Price in table rows
-                    const tcgLowRows = Array.from(document.querySelectorAll('tr')).filter row => {
+                    const tcgLowRows = Array.from(document.querySelectorAll('tr')).filter(row => {
                         const text = row.textContent?.toLowerCase() || '';
                         return (text.includes('tcg low') || text.includes('low price') || 
                                 text.includes('tcg direct low') || 
