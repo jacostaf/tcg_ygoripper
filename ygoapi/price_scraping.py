@@ -100,6 +100,8 @@ class PriceScrapingService:
         This prevents race conditions when multiple requests come in parallel.
         """
         try:
+            logger.info(f"🔄 Starting threaded async scraping for {card_name} ({card_rarity})")
+            
             # Create a new event loop for this thread
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -109,20 +111,26 @@ class PriceScrapingService:
                 result = loop.run_until_complete(
                     self.scrape_price_from_tcgplayer_basic(card_name, card_rarity, art_variant, card_number)
                 )
+                
+                logger.info(f"✅ Threaded async scraping completed for {card_name}: {result.get('tcgplayer_price', 'No price')} / {result.get('tcgplayer_market_price', 'No market price')}")
                 return result
+                
             finally:
                 # Always close the loop when done
-                loop.close()
+                try:
+                    loop.close()
+                except Exception as loop_error:
+                    logger.warning(f"Error closing event loop: {loop_error}")
                 
         except Exception as e:
-            logger.error(f"Error in threaded async scraping: {e}")
+            logger.error(f"❌ Error in threaded async scraping for {card_name}: {e}", exc_info=True)
             return {
                 "tcgplayer_price": None,
                 "tcgplayer_market_price": None,
                 "tcgplayer_url": None,
                 "tcgplayer_product_id": None,
                 "tcgplayer_variant_selected": None,
-                "error": str(e)
+                "error": f"Threading error: {str(e)}"
             }
 
     def _initialize_collections(self):
@@ -1052,10 +1060,15 @@ class PriceScrapingService:
             # STEP 3: Scrape from source (validation passed or proven valid by stale cache)
             logger.info(f"🌐 Scraping fresh price data from TCGPlayer for {card_name} ({card_rarity})")
             try:
-                # Use asyncio to run the async scraping function
-                price_data = self._scraping_executor.submit(
+                # Use thread pool executor for proper concurrency handling
+                logger.info(f"📋 Submitting scraping task to thread pool for {card_name}")
+                future = self._scraping_executor.submit(
                     self._run_async_scraping_in_thread, card_name, card_rarity, art_variant, card_number
-                ).result()
+                )
+                
+                # Get the result with timeout to prevent hanging
+                price_data = future.result(timeout=3600)  # 1 hour timeout
+                logger.info(f"🎯 Received scraping result for {card_name}: success={not bool(price_data.get('error'))}")
                 
                 # Save to cache if successful
                 if price_data and not price_data.get('error'):
@@ -1082,7 +1095,7 @@ class PriceScrapingService:
                 }
                 
             except Exception as e:
-                logger.error(f"Error scraping price for {card_number}: {e}")
+                logger.error(f"❌ Error in thread pool execution for {card_number}: {e}", exc_info=True)
                 return {
                     "success": False,
                     "card_number": card_number,
@@ -1090,7 +1103,7 @@ class PriceScrapingService:
                     "card_rarity": card_rarity,
                     "art_variant": art_variant,
                     "cached": False,
-                    "error": str(e)
+                    "error": f"Thread pool execution error: {str(e)}"
                 }
                 
         except Exception as e:
