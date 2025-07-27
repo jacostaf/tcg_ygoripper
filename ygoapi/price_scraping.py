@@ -8,7 +8,7 @@ This module provides synchronous price scraping functionality with memory optimi
 import asyncio
 import logging
 import re
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any, Tuple
 from playwright.async_api import async_playwright
 from urllib.parse import quote
@@ -282,7 +282,7 @@ class PriceScrapingService:
                 return None
                 
             # Sort by last_price_updt in descending order to get the most recent
-            documents.sort(key=lambda x: x.get('last_price_updt', datetime.min.replace(tzinfo=UTC)), reverse=True)
+            documents.sort(key=lambda x: x.get('last_price_updt', datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
             
             # Get the most recent document
             document = documents[0]
@@ -306,72 +306,109 @@ class PriceScrapingService:
     @monitor_memory
     def validate_card_rarity(self, card_number: str, card_rarity: str) -> bool:
         """
-        Validate that a card rarity exists for a given card number.
+        Validate that a card rarity exists for a given card number in its specific set.
+        
+        IMPORTANT: This validates against the ORIGINAL SET DATA, not our cache.
+        Our cache may be incomplete - missing some rarities that actually exist.
         
         Args:
-            card_number: Card number to validate
-            card_rarity: Card rarity to validate
+            card_number: Card number to validate (e.g., "LOB-001")
+            card_rarity: Card rarity to validate (e.g., "Ultra Rare")
             
         Returns:
-            bool: True if rarity is valid for the card
+            bool: True if rarity is valid for the card in that specific set, or if card not in database
         """
         try:
             self._ensure_initialized()
             
             # Check if database is disabled
             if self.variants_collection is None:
-                logger.info("Database disabled, skipping rarity validation")
+                logger.info("Database disabled, allowing scrape to proceed")
                 return True  # Allow validation to pass when database is disabled
             
-            # First find the card with this set_code to get its card_name (like original implementation)
+            # Extract set code from card number to validate against original set data
+            set_code = extract_set_code(card_number)
+            if not set_code:
+                logger.info(f"Could not extract set code from {card_number} - allowing scrape to proceed")
+                return True
+            
+            # Try to validate against YGO API set data (original source of truth)
+            try:
+                api_url = f"{YGO_API_BASE_URL}/cardinfo.php?cardset={quote(set_code)}"
+                response = requests.get(api_url, timeout=10)
+                
+                if response.status_code == 200:
+                    api_data = response.json()
+                    if 'data' in api_data and api_data['data']:
+                        # Find our specific card in the API results
+                        for card in api_data['data']:
+                            card_sets = card.get('card_sets', [])
+                            for card_set in card_sets:
+                                if card_set.get('set_code') == card_number:
+                                    set_rarity = card_set.get('set_rarity', '')
+                                    if normalize_rarity(card_rarity) == normalize_rarity(set_rarity):
+                                        logger.info(f"✓ Rarity '{card_rarity}' validated against YGO API for {card_number}")
+                                        return True
+                                    elif self._are_rarities_equivalent(normalize_rarity(card_rarity), normalize_rarity(set_rarity)):
+                                        logger.info(f"✓ Rarity '{card_rarity}' validated as equivalent to '{set_rarity}' for {card_number}")
+                                        return True
+                
+                logger.info(f"Card {card_number} rarity '{card_rarity}' not found in YGO API - checking cache as fallback")
+            except Exception as api_error:
+                logger.warning(f"YGO API validation failed for {card_number}: {api_error} - falling back to cache")
+            
+            # Fallback: Check our cache (but acknowledge it may be incomplete)
+            # Find ALL entries for this card number (cards can have multiple rarities)
             query = {"set_code": card_number}
-            card_document = self.variants_collection.find_one(query)
+            all_card_entries = list(self.variants_collection.find(query))
             
-            if not card_document:
-                logger.warning(f"Card {card_number} not found in YGO_CARD_VARIANT_CACHE_V1")
-                # If card is not found in our database, allow the rarity (fallback)
+            if not all_card_entries:
+                logger.info(f"Card {card_number} not found in cache - allowing scrape to proceed (fallback behavior)")
+                # If card is not found in our database, allow the scrape to proceed
+                # This handles cases where our database might not be complete
                 return True
             
-            # Get the card name to find all variants of this card
-            card_name = card_document.get('card_name')
-            if not card_name:
+            # Extract all available rarities for this specific card number from cache
+            available_rarities = []
+            for entry in all_card_entries:
+                card_set_rarity = entry.get('set_rarity')
+                if card_set_rarity:
+                    available_rarities.append(card_set_rarity)
+            
+            if not available_rarities:
+                logger.info(f"No rarities found for card {card_number} in cache - allowing scrape to proceed")
                 return True
-            
-            # Find all variants of this card to get available rarities
-            variants_query = {"card_name": card_name}
-            all_variants = self.variants_collection.find(variants_query)
-            
-            # Extract available rarities from all variants
-            available_rarities = set()
-            for variant in all_variants:
-                rarity = variant.get('set_rarity')
-                if rarity:
-                    available_rarities.add(rarity.lower().strip())
             
             # Normalize the requested rarity for comparison
             normalized_requested = normalize_rarity(card_rarity)
             
-            # Check if the normalized requested rarity matches any available rarity
+            # Check if the normalized requested rarity matches any available rarity in cache
             for available_rarity in available_rarities:
                 normalized_available = normalize_rarity(available_rarity)
                 
                 # Check for exact match
                 if normalized_requested == normalized_available:
-                    logger.info(f"Rarity '{card_rarity}' validated for card {card_number}")
+                    logger.info(f"✓ Rarity '{card_rarity}' validated for card {card_number} in cache (matches '{available_rarity}')")
                     return True
                 
-                # Check for special equivalences mentioned in the comment
+                # Check for special equivalences (e.g., Ultimate Rare vs Prismatic Ultimate Rare)
                 if self._are_rarities_equivalent(normalized_requested, normalized_available):
-                    logger.info(f"Rarity '{card_rarity}' validated for card {card_number} (equivalent to '{available_rarity}')")
+                    logger.info(f"✓ Rarity '{card_rarity}' validated for card {card_number} (equivalent to '{available_rarity}' in cache)")
                     return True
             
-            logger.warning(f"No matching rarity found for card {card_number} with rarity {card_rarity}")
-            logger.warning(f"Available rarities: {', '.join(sorted(available_rarities))}")
-            return False
+            # Cache validation failed - but cache might be incomplete
+            # Log warning but allow scrape with caution
+            logger.warning(f"⚠ Rarity '{card_rarity}' not found in cache for card {card_number}")
+            logger.warning(f"Available rarities in cache: {', '.join(available_rarities)}")
+            logger.warning(f"Allowing scrape to proceed - cache may be incomplete")
+            
+            # CHANGED: Allow scrape to proceed even if not in cache, since cache may be incomplete
+            return True
             
         except Exception as e:
             logger.error(f"Error validating card rarity: {e}")
-            # Like the original implementation, return True on exception to allow fallback behavior
+            # On exception, allow scrape to proceed rather than blocking
+            logger.info(f"Validation error for {card_number} - allowing scrape to proceed as fallback")
             return True
     
     def _are_rarities_equivalent(self, rarity1: str, rarity2: str) -> bool:
@@ -385,6 +422,10 @@ class PriceScrapingService:
         Returns:
             bool: True if rarities are equivalent
         """
+        # Normalize inputs to lowercase for comparison
+        rarity1 = rarity1.lower().strip()
+        rarity2 = rarity2.lower().strip()
+        
         # Ultimate Rare and Prismatic Ultimate Rare should be treated the same
         if ((rarity1 == 'ultimate rare' and rarity2 == 'prismatic ultimate rare') or
             (rarity1 == 'prismatic ultimate rare' and rarity2 == 'ultimate rare')):
@@ -768,7 +809,12 @@ class PriceScrapingService:
         force_refresh: bool = False
     ) -> Dict[str, Any]:
         """
-        Scrape price for a card with caching.
+        Scrape price for a card with intelligent caching and validation logic.
+        
+        Flow:
+        1. Cache Hit (Fresh) → Return immediately 
+        2. Cache Hit (Stale) → Skip validation (rarity proven valid) → Scrape fresh
+        3. Cache Miss → Validate rarity → If valid scrape, if invalid fail
         
         Args:
             card_number: Card number
@@ -781,32 +827,78 @@ class PriceScrapingService:
             Dict: Price scraping response
         """
         try:
-            # Check cache first unless force refresh
+            cache_status = "miss"  # Track what happened with cache
+            
+            # STEP 1: Check cache first (unless force refresh)
             if not force_refresh:
-                logger.info(f"Checking cache for card: {card_number}, name: {card_name}, rarity: {card_rarity}, art: {art_variant}")
-                cached_data = self.find_cached_price_data(
+                logger.info(f"🚀 Checking cache for {card_number} ({card_rarity})")
+                
+                # Check cache including stale data
+                cached_data = self._find_cached_price_data_with_staleness_info(
                     card_number, card_name, card_rarity, art_variant
                 )
+                
                 if cached_data:
-                    logger.info(f"✓ Using cached price data for {card_number} - cache hit!")
-                    cleaned_data = clean_card_data(cached_data)
+                    if cached_data["is_fresh"]:
+                        # CASE 1: Cache Hit (Fresh) - Return immediately
+                        logger.info(f"✓ Fresh cache hit for {card_number} - returning immediately")
+                        cache_status = "fresh_hit"
+                        cleaned_data = clean_card_data(cached_data["data"])
+                        return {
+                            "success": True,
+                            "card_number": card_number,
+                            "card_name": card_name,
+                            "card_rarity": card_rarity,
+                            "art_variant": art_variant,
+                            "cached": True,
+                            "last_updated": cached_data["data"].get('last_price_updt'),
+                            **cleaned_data
+                        }
+                    else:
+                        # CASE 2: Cache Hit (Stale) - Rarity already proven valid, skip validation
+                        logger.info(f"⏰ Stale cache hit for {card_number} - rarity already validated, proceeding to fresh scrape")
+                        cache_status = "stale_hit"
+                        # Continue to scraping without validation
+                else:
+                    # CASE 3: Cache Miss - Need to validate rarity
+                    logger.info(f"❌ Cache miss for {card_number} - will validate rarity before scraping")
+                    cache_status = "miss"
+            else:
+                logger.info(f"🔄 Force refresh requested for {card_number} - skipping cache")
+                cache_status = "force_refresh"
+
+            # STEP 2: Rarity validation (only for cache miss or force refresh)
+            if cache_status in ["miss", "force_refresh"] and card_number:
+                logger.info(f"🔍 Validating rarity '{card_rarity}' for card {card_number} (cache {cache_status})")
+                try:
+                    is_valid_rarity = self.validate_card_rarity(card_number, card_rarity)
+                    if not is_valid_rarity:
+                        logger.warning(f"✗ Invalid rarity '{card_rarity}' for card {card_number} - stopping price scraping")
+                        return {
+                            "success": False,
+                            "card_number": card_number,
+                            "card_name": card_name,
+                            "card_rarity": card_rarity,
+                            "art_variant": art_variant,
+                            "error": f"Invalid rarity '{card_rarity}' for card {card_number}. This rarity does not exist for this card in its set."
+                        }
+                    else:
+                        logger.info(f"✓ Rarity validation passed for {card_number} - proceeding with fresh scrape")
+                except Exception as validation_error:
+                    logger.error(f"Error during rarity validation for {card_number}: {validation_error}")
                     return {
-                        "success": True,
+                        "success": False,
                         "card_number": card_number,
                         "card_name": card_name,
                         "card_rarity": card_rarity,
                         "art_variant": art_variant,
-                        "cached": True,
-                        "last_updated": cached_data.get('last_price_updt'),
-                        **cleaned_data
+                        "error": f"Validation error: {str(validation_error)}"
                     }
-                else:
-                    logger.info(f"No cached data found for {card_number} - will scrape fresh data")
-            else:
-                logger.info(f"Force refresh requested for {card_number} - skipping cache")
+            elif cache_status == "stale_hit":
+                logger.info(f"⚡ Skipping validation for {card_number} - rarity already proven valid by stale cache")
             
-            # Scrape from source
-            logger.info(f"Scraping fresh price data from TCGPlayer for {card_name} ({card_rarity})")
+            # STEP 3: Scrape from source (validation passed or proven valid by stale cache)
+            logger.info(f"🌐 Scraping fresh price data from TCGPlayer for {card_name} ({card_rarity})")
             try:
                 # Use asyncio to run the async scraping function
                 price_data = asyncio.run(
@@ -859,6 +951,84 @@ class PriceScrapingService:
                 "art_variant": art_variant,
                 "error": str(e)
             }
+
+    def _find_cached_price_data_with_staleness_info(
+        self,
+        card_number: str,
+        card_name: str,
+        card_rarity: str,
+        art_variant: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Find cached price data and return both the data and staleness information.
+        
+        Returns:
+            Optional[Dict]: {
+                "data": cached_document,
+                "is_fresh": bool,
+                "last_updated": datetime
+            } or None if not found
+        """
+        try:
+            self._ensure_initialized()
+            
+            if self.cache_collection is None:
+                logger.debug("Database disabled, skipping cache lookup")
+                return None
+            
+            # Normalize inputs
+            normalized_rarity = card_rarity.lower().strip()
+            normalized_art_variant = self._normalize_art_variant(art_variant) if art_variant else None
+            
+            logger.debug(f"Searching cache with staleness check - Number: {card_number}, Rarity: {normalized_rarity}, "
+                        f"Art Variant: {normalized_art_variant or 'None'}")
+            
+            # Build base query with card number and rarity
+            query = {
+                "card_number": card_number,
+                "card_rarity": {"$regex": f"^{re.escape(normalized_rarity)}$", "$options": "i"}
+            }
+            
+            # Handle art variant if provided
+            if normalized_art_variant:
+                query["$or"] = [
+                    {"art_variant": {"$exists": False}},
+                    {"art_variant": ""},
+                    {"art_variant": {"$in": self._get_art_variant_alternatives(normalized_art_variant)}}
+                ]
+            
+            # Find all matching documents
+            documents = list(self.cache_collection.find(query))
+            
+            if not documents:
+                logger.debug(f"No cached data found for {card_number}")
+                return None
+                
+            # Sort by last_price_updt in descending order to get the most recent
+            documents.sort(key=lambda x: x.get('last_price_updt', datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
+            
+            # Get the most recent document
+            document = documents[0]
+            last_updated = document.get('last_price_updt')
+            
+            if not last_updated:
+                logger.debug(f"Found cached data for {card_number} but missing last_price_updt")
+                return None
+            
+            # Check if data is fresh
+            is_fresh = is_cache_fresh(last_updated, PRICE_CACHE_EXPIRY_DAYS)
+            
+            logger.debug(f"Found cached data for {card_number} - Fresh: {is_fresh}, Updated: {last_updated}")
+            
+            return {
+                "data": document,
+                "is_fresh": is_fresh,
+                "last_updated": last_updated
+            }
+                
+        except Exception as e:
+            logger.error(f"Error finding cached price data with staleness info for {card_number}: {e}")
+            return None
     
     @monitor_memory
     async def select_best_tcgplayer_variant(
@@ -1001,36 +1171,36 @@ class PriceScrapingService:
                 # Score for art variant match (CRITICAL for this bug fix)
                 if target_art_version:
                     art_version_score = 0
-                    target_art = str(target_art_version).strip().lower()
+                    target_art = str(target_art_version).strip().lower();
                     
                     # Extract art variant from this variant's title and URL
-                    variant_art = extract_art_version(variant['title'])
+                    variant_art = extract_art_version(variant['title']);
                     if not variant_art:
-                        variant_art = extract_art_version(variant['url'])
+                        variant_art = extract_art_version(variant['url']);
                     
                     if variant_art:
-                        variant_art_normalized = str(variant_art).strip().lower()
+                        variant_art_normalized = str(variant_art).strip().lower();
                         # Remove ordinal suffixes for comparison
-                        target_art_clean = re.sub(r'(st|nd|rd|th)$', '', target_art)
-                        variant_art_clean = re.sub(r'(st|nd|rd|th)$', '', variant_art_normalized)
+                        target_art_clean = re.sub(r'(st|nd|rd|th)$', '', target_art);
+                        variant_art_clean = re.sub(r'(st|nd|rd|th)$', '', variant_art_normalized);
                         
                         if target_art_clean == variant_art_clean:
                             # Exact art variant match - high score
-                            art_version_score = 100
-                            logger.info(f"✓ EXACT art variant match: '{target_art_version}' == '{variant_art}'")
+                            art_version_score = 100;
+                            logger.info(f"✓ EXACT art variant match: '{target_art_version}' == '{variant_art}'");
                         else:
                             # Art variant mismatch - penalty
-                            art_version_score = -50
-                            logger.warning(f"✗ Art variant mismatch: '{target_art_version}' != '{variant_art}'")
+                            art_version_score = -50;
+                            logger.warning(f"✗ Art variant mismatch: '{target_art_version}' != '{variant_art}'");
                     else:
                         # No art variant found in title - check for basic presence in text
                         if target_art in title_lower or target_art in url_lower:
-                            art_version_score = 25
-                            logger.info(f"⚠ Weak art variant match for '{target_art_version}' found in text")
+                            art_version_score = 25;
+                            logger.info(f"⚠ Weak art variant match for '{target_art_version}' found in text");
                         else:
                             # No art variant info available - small penalty
-                            art_version_score = -10
-                            logger.info(f"⚠ No art variant info found for comparison")
+                            art_version_score = -10;
+                            logger.info(f"⚠ No art variant info found for comparison");
                     
                     score += art_version_score
                 
@@ -1047,12 +1217,12 @@ class PriceScrapingService:
                 best_variant = scored_variants[0][1]
                 best_score = scored_variants[0][0]
                 logger.info(f"\\n✓ SELECTED BEST VARIANT (Score: {best_score}): {best_variant['title'][:100]}...")
-                logger.info(f"URL: {best_variant['url']}")
-                return best_variant['url']
+                logger.info(f"URL: {best_variant['url']}");
+                return best_variant['url'];
             else:
-                logger.warning("No good variant match found, using first variant if available")
+                logger.warning("No good variant match found, using first variant if available");
                 if variants:
-                    return variants[0]['url']
+                    return variants[0]['url'];
                 
             return None
             

@@ -8,7 +8,7 @@ used throughout the YGO API application.
 import re
 import logging
 from typing import Optional, List, Dict, Any, Generator
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, timedelta, timezone
 from .memory_manager import monitor_memory
 
 logger = logging.getLogger(__name__)
@@ -616,11 +616,11 @@ def is_cache_fresh(last_updated: datetime, cache_days: int = 7) -> bool:
     
     # Ensure last_updated is timezone-aware (assume UTC if naive)
     if last_updated.tzinfo is None:
-        last_updated = last_updated.replace(tzinfo=UTC)
+        last_updated = last_updated.replace(tzinfo=timezone.utc)
     
     # Calculate expiry time
     expiry_time = last_updated + timedelta(days=cache_days)
-    current_time = datetime.now(UTC)
+    current_time = datetime.now(timezone.utc)
     
     return current_time < expiry_time
 
@@ -670,7 +670,7 @@ def parse_price_string(price_str: str) -> Optional[float]:
 
 def get_current_utc_datetime() -> datetime:
     """Get current UTC datetime."""
-    return datetime.now(UTC)
+    return datetime.now(timezone.utc)
 
 def format_datetime_for_api(dt: datetime) -> str:
     """Format datetime for API response."""

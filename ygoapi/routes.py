@@ -11,6 +11,7 @@ import requests
 from flask import Flask, jsonify, request, Response
 from typing import Dict, Any
 from urllib.parse import unquote
+from datetime import datetime, timezone
 
 from .card_services import card_set_service, card_variant_service, card_lookup_service
 from .price_scraping import price_scraping_service
@@ -84,17 +85,6 @@ def register_routes(app: Flask) -> None:
             
             logger.info(f"Price request for card: {card_number or 'None'}, name: {card_name or 'None'}, rarity: {card_rarity}, art: {art_variant}, force_refresh: {force_refresh}")
             
-            # Validate card rarity if card_number is provided
-            if card_number:
-                logger.info(f"Validating rarity '{card_rarity}' for card {card_number}")
-                is_valid_rarity = price_scraping_service.validate_card_rarity(card_number, card_rarity)
-                
-                if not is_valid_rarity:
-                    return jsonify({
-                        "success": False,
-                        "error": f"Invalid rarity '{card_rarity}' for card {card_number}. Please check the card variant database for available rarities."
-                    }), 400
-            
             # Look up card name if not provided
             if not card_name and card_number:
                 card_name = price_scraping_service.lookup_card_name(card_number)
@@ -104,8 +94,8 @@ def register_routes(app: Flask) -> None:
                     # and let the scraping service handle the fallback behavior
                     logger.warning(f"Could not find card name for card number: {card_number}, continuing with scraping anyway")
                     card_name = ""  # Continue with empty card name
-            
-            # Scrape price
+
+            # Scrape price (validation now happens in service layer for cache misses only)
             result = price_scraping_service.scrape_card_price(
                 card_number=card_number or "",
                 card_name=card_name or "",
@@ -147,13 +137,12 @@ def register_routes(app: Flask) -> None:
             message = "Price data scraped and saved successfully"
             
             if is_cached and result.get('last_updated'):
-                from datetime import datetime, UTC
                 try:
                     last_updated = result['last_updated']
                     if hasattr(last_updated, 'timestamp'):
                         # It's already a datetime object
-                        current_time = datetime.now(UTC)
-                        cache_age = current_time - last_updated.replace(tzinfo=UTC) if last_updated.tzinfo is None else current_time - last_updated
+                        current_time = datetime.now(timezone.utc)
+                        cache_age = current_time - last_updated.replace(tzinfo=timezone.utc) if last_updated.tzinfo is None else current_time - last_updated
                         cache_age_hours = cache_age.total_seconds() / 3600
                     message = "Price data retrieved from cache"
                 except Exception as e:
