@@ -341,10 +341,22 @@ class MemoryManager:
     
     def _monitoring_loop(self, interval: float) -> None:
         """Memory monitoring loop."""
+        monitor_cycle = 0
         while not self._stop_monitoring.wait(interval):
             try:
+                monitor_cycle += 1
                 current_memory = self.get_memory_usage() / 1024 / 1024  # MB
                 current_time = time.time()
+                
+                # Get detailed usage statistics
+                usage = self.get_current_memory_usage()
+                
+                # Log memory stats every cycle (INFO level)
+                logger.info(f"Memory Monitor [Cycle {monitor_cycle}]: "
+                           f"Current: {usage['rss_mb']:.1f}MB "
+                           f"({usage['usage_ratio']:.1%} of {usage['limit_mb']}MB limit) "
+                           f"| System: {usage['percent']:.1f}% "
+                           f"| Cache: {self.cache.size()} items")
                 
                 # Store memory history
                 with self._stats_lock:
@@ -352,8 +364,17 @@ class MemoryManager:
                     if len(self._memory_history) > 1000:
                         self._memory_history = self._memory_history[-500:]
                 
+                # Check thresholds and log status
+                if usage['usage_ratio'] >= self.critical_threshold:
+                    logger.warning(f"Memory Monitor: CRITICAL threshold exceeded ({usage['usage_ratio']:.1%} >= {self.critical_threshold:.0%})")
+                elif usage['usage_ratio'] >= self.warning_threshold:
+                    logger.warning(f"Memory Monitor: WARNING threshold exceeded ({usage['usage_ratio']:.1%} >= {self.warning_threshold:.0%})")
+                elif usage['usage_ratio'] >= self.cleanup_threshold:
+                    logger.info(f"Memory Monitor: Cleanup threshold exceeded ({usage['usage_ratio']:.1%} >= {self.cleanup_threshold:.0%})")
+                else:
+                    logger.info(f"Memory Monitor: Memory usage is healthy ({usage['usage_ratio']:.1%} < {self.cleanup_threshold:.0%} cleanup threshold)")
+                
                 # Check if automatic cleanup is needed
-                usage = self.get_current_memory_usage()
                 if usage['usage_ratio'] >= self.cleanup_threshold:
                     logger.info(f"Automatic memory cleanup triggered at {usage['usage_ratio']:.1%}")
                     self.optimize_memory()
