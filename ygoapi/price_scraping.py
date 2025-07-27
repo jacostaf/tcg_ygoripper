@@ -8,6 +8,8 @@ This module provides synchronous price scraping functionality with memory optimi
 import asyncio
 import logging
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any, Tuple
 from playwright.async_api import async_playwright
@@ -51,17 +53,17 @@ from .memory_manager import monitor_memory, get_memory_manager
 logger = logging.getLogger(__name__)
 
 class PriceScrapingService:
-    """Service for managing price scraping operations."""
+    """Service for managing price scraping operations with proper concurrency handling."""
     
     def __init__(self):
         self.memory_manager = get_memory_manager()
         self.cache_collection = None
         self.variants_collection = None
         self._initialized = False
-        self._browser = None
-        self._playwright = None
+        self._scraping_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="price_scraper")
+        self._async_loop_lock = threading.Lock()
         # Register cleanup callback with memory manager
-        self.memory_manager.register_cleanup_callback("price_scraper_cleanup", self.cleanup_playwright)
+        self.memory_manager.register_cleanup_callback("price_scraper_cleanup", self.cleanup_resources)
     
     def _ensure_initialized(self):
         """Ensure collections are initialized before use."""
@@ -69,38 +71,60 @@ class PriceScrapingService:
             self._initialize_collections()
             self._initialized = True
             
-    def cleanup_playwright(self):
-        """Force cleanup of Playwright resources."""
+    def cleanup_resources(self):
+        """Force cleanup of all resources."""
         try:
-            if hasattr(self, '_browser') and self._browser:
+            logger.info("Cleaning up price scraping resources...")
+            
+            # Shutdown executor
+            if hasattr(self, '_scraping_executor') and self._scraping_executor:
                 try:
-                    self._browser.close()
+                    self._scraping_executor.shutdown(wait=False)
                 except Exception as e:
-                    logger.warning(f"Error closing browser during cleanup: {e}")
+                    logger.warning(f"Error shutting down executor: {e}")
                 finally:
-                    self._browser = None
-                    
-            if hasattr(self, '_playwright') and self._playwright:
-                try:
-                    self._playwright.stop()
-                except Exception as e:
-                    logger.warning(f"Error stopping Playwright during cleanup: {e}")
-                finally:
-                    self._playwright = None
+                    self._scraping_executor = None
                     
             # Force garbage collection
             import gc
             gc.collect()
             
-            logger.info("Playwright resources cleaned up")
+            logger.info("Price scraping resources cleaned up")
             
         except Exception as e:
-            logger.error(f"Error during Playwright cleanup: {e}")
-        finally:
-            # Ensure we don't leave any references
-            self._browser = None
-            self._playwright = None
+            logger.error(f"Error during cleanup: {e}")
     
+    def _run_async_scraping_in_thread(self, card_name: str, card_rarity: str, art_variant: Optional[str], card_number: Optional[str]) -> Dict[str, Any]:
+        """
+        Run async scraping in a dedicated thread with proper event loop handling.
+        This prevents race conditions when multiple requests come in parallel.
+        """
+        try:
+            # Create a new event loop for this thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            try:
+                # Run the async function in this thread's event loop
+                result = loop.run_until_complete(
+                    self.scrape_price_from_tcgplayer_basic(card_name, card_rarity, art_variant, card_number)
+                )
+                return result
+            finally:
+                # Always close the loop when done
+                loop.close()
+                
+        except Exception as e:
+            logger.error(f"Error in threaded async scraping: {e}")
+            return {
+                "tcgplayer_price": None,
+                "tcgplayer_market_price": None,
+                "tcgplayer_url": None,
+                "tcgplayer_product_id": None,
+                "tcgplayer_variant_selected": None,
+                "error": str(e)
+            }
+
     def _initialize_collections(self):
         """Initialize MongoDB collections for price scraping."""
         try:
@@ -1029,9 +1053,9 @@ class PriceScrapingService:
             logger.info(f"🌐 Scraping fresh price data from TCGPlayer for {card_name} ({card_rarity})")
             try:
                 # Use asyncio to run the async scraping function
-                price_data = asyncio.run(
-                    self.scrape_price_from_tcgplayer_basic(card_name, card_rarity, art_variant, card_number)
-                )
+                price_data = self._scraping_executor.submit(
+                    self._run_async_scraping_in_thread, card_name, card_rarity, art_variant, card_number
+                ).result()
                 
                 # Save to cache if successful
                 if price_data and not price_data.get('error'):
