@@ -8,7 +8,7 @@ This module provides synchronous price scraping functionality with memory optimi
 import asyncio
 import logging
 import re
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any, Tuple
 from playwright.async_api import async_playwright
 from urllib.parse import quote
@@ -282,7 +282,7 @@ class PriceScrapingService:
                 return None
                 
             # Sort by last_price_updt in descending order to get the most recent
-            documents.sort(key=lambda x: x.get('last_price_updt', datetime.min.replace(tzinfo=UTC)), reverse=True)
+            documents.sort(key=lambda x: x.get('last_price_updt', datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
             
             # Get the most recent document
             document = documents[0]
@@ -1001,36 +1001,36 @@ class PriceScrapingService:
                 # Score for art variant match (CRITICAL for this bug fix)
                 if target_art_version:
                     art_version_score = 0
-                    target_art = str(target_art_version).strip().lower()
+                    target_art = str(target_art_version).strip().lower();
                     
                     # Extract art variant from this variant's title and URL
-                    variant_art = extract_art_version(variant['title'])
+                    variant_art = extract_art_version(variant['title']);
                     if not variant_art:
-                        variant_art = extract_art_version(variant['url'])
+                        variant_art = extract_art_version(variant['url']);
                     
                     if variant_art:
-                        variant_art_normalized = str(variant_art).strip().lower()
+                        variant_art_normalized = str(variant_art).strip().lower();
                         # Remove ordinal suffixes for comparison
-                        target_art_clean = re.sub(r'(st|nd|rd|th)$', '', target_art)
-                        variant_art_clean = re.sub(r'(st|nd|rd|th)$', '', variant_art_normalized)
+                        target_art_clean = re.sub(r'(st|nd|rd|th)$', '', target_art);
+                        variant_art_clean = re.sub(r'(st|nd|rd|th)$', '', variant_art_normalized);
                         
                         if target_art_clean == variant_art_clean:
                             # Exact art variant match - high score
-                            art_version_score = 100
-                            logger.info(f"✓ EXACT art variant match: '{target_art_version}' == '{variant_art}'")
+                            art_version_score = 100;
+                            logger.info(f"✓ EXACT art variant match: '{target_art_version}' == '{variant_art}'");
                         else:
                             # Art variant mismatch - penalty
-                            art_version_score = -50
-                            logger.warning(f"✗ Art variant mismatch: '{target_art_version}' != '{variant_art}'")
+                            art_version_score = -50;
+                            logger.warning(f"✗ Art variant mismatch: '{target_art_version}' != '{variant_art}'");
                     else:
                         # No art variant found in title - check for basic presence in text
                         if target_art in title_lower or target_art in url_lower:
-                            art_version_score = 25
-                            logger.info(f"⚠ Weak art variant match for '{target_art_version}' found in text")
+                            art_version_score = 25;
+                            logger.info(f"⚠ Weak art variant match for '{target_art_version}' found in text");
                         else:
                             # No art variant info available - small penalty
-                            art_version_score = -10
-                            logger.info(f"⚠ No art variant info found for comparison")
+                            art_version_score = -10;
+                            logger.info(f"⚠ No art variant info found for comparison");
                     
                     score += art_version_score
                 
@@ -1047,12 +1047,12 @@ class PriceScrapingService:
                 best_variant = scored_variants[0][1]
                 best_score = scored_variants[0][0]
                 logger.info(f"\\n✓ SELECTED BEST VARIANT (Score: {best_score}): {best_variant['title'][:100]}...")
-                logger.info(f"URL: {best_variant['url']}")
-                return best_variant['url']
+                logger.info(f"URL: {best_variant['url']}");
+                return best_variant['url'];
             else:
-                logger.warning("No good variant match found, using first variant if available")
+                logger.warning("No good variant match found, using first variant if available");
                 if variants:
-                    return variants[0]['url']
+                    return variants[0]['url'];
                 
             return None
             

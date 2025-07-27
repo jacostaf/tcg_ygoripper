@@ -8,7 +8,7 @@ and card data operations with memory optimization.
 import logging
 import time
 from typing import Dict, List, Optional, Any, Generator
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 from urllib.parse import quote
 import requests
 

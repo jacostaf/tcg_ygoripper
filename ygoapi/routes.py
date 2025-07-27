@@ -11,6 +11,7 @@ import requests
 from flask import Flask, jsonify, request, Response
 from typing import Dict, Any
 from urllib.parse import unquote
+from datetime import datetime, timezone
 
 from .card_services import card_set_service, card_variant_service, card_lookup_service
 from .price_scraping import price_scraping_service
@@ -59,7 +60,7 @@ def register_routes(app: Flask) -> None:
                 return jsonify({
                     "success": False,
                     "error": "Either card_number or card_name is required"
-                }), 400
+                }, 400)
             
             card_rarity = data.get('card_rarity', '').strip() if data.get('card_rarity') else None
             
@@ -147,13 +148,12 @@ def register_routes(app: Flask) -> None:
             message = "Price data scraped and saved successfully"
             
             if is_cached and result.get('last_updated'):
-                from datetime import datetime, UTC
                 try:
                     last_updated = result['last_updated']
                     if hasattr(last_updated, 'timestamp'):
                         # It's already a datetime object
-                        current_time = datetime.now(UTC)
-                        cache_age = current_time - last_updated.replace(tzinfo=UTC) if last_updated.tzinfo is None else current_time - last_updated
+                        current_time = datetime.now(timezone.utc)
+                        cache_age = current_time - last_updated.replace(tzinfo=timezone.utc) if last_updated.tzinfo is None else current_time - last_updated
                         cache_age_hours = cache_age.total_seconds() / 3600
                     message = "Price data retrieved from cache"
                 except Exception as e:
