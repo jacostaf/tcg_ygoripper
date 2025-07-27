@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from .card_services import card_set_service, card_variant_service, card_lookup_service
 from .price_scraping import price_scraping_service
 from .memory_manager import get_memory_stats, force_memory_cleanup, monitor_memory
-from .utils import extract_art_version, clean_card_data, extract_set_code, extract_booster_set_name
+from .utils import extract_art_version, clean_card_data, extract_set_code, extract_booster_set_name, validate_card_input
 from .config import API_RATE_LIMIT_DELAY, YGO_API_BASE_URL
 
 logger = logging.getLogger(__name__)
@@ -81,6 +81,20 @@ def register_routes(app: Flask) -> None:
                 return jsonify({
                     "success": False,
                     "error": "card_rarity is required and cannot be empty"
+                }), 400
+            
+            # SECURITY: Validate inputs for malicious content
+            is_valid, error_msg = validate_card_input(
+                card_number=card_number,
+                card_rarity=card_rarity, 
+                card_name=card_name,
+                art_variant=art_variant
+            )
+            
+            if not is_valid:
+                return jsonify({
+                    "success": False,
+                    "error": error_msg
                 }), 400
             
             logger.info(f"Price request for card: {card_number or 'None'}, name: {card_name or 'None'}, rarity: {card_rarity}, art: {art_variant}, force_refresh: {force_refresh}")

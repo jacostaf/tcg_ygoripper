@@ -645,6 +645,164 @@ def sanitize_string(value: str) -> str:
     return sanitized.strip()
 
 @monitor_memory
+def validate_input_security(value: str, field_name: str = "") -> bool:
+    """
+    Validate input for security threats like XSS and SQL injection.
+    
+    Args:
+        value: Input value to validate
+        field_name: Name of the field for logging
+        
+    Returns:
+        bool: True if input is safe, False if potentially malicious
+    """
+    if not value:
+        return True
+    
+    # Convert to lowercase for pattern matching
+    value_lower = value.lower()
+    
+    # Check for XSS patterns
+    xss_patterns = [
+        r'<script[^>]*>',
+        r'javascript:',
+        r'on\w+\s*=',  # Event handlers like onclick=
+        r'<iframe[^>]*>',
+        r'<object[^>]*>',
+        r'<embed[^>]*>',
+        r'<link[^>]*>',
+        r'<meta[^>]*>',
+        r'<style[^>]*>',
+        r'<img[^>]*onerror',
+        r'<img[^>]*onload',
+        r'vbscript:',
+        r'expression\s*\(',
+        r'url\s*\(',
+        r'@import',
+    ]
+    
+    # Check for SQL injection patterns
+    sql_patterns = [
+        r';\s*drop\s+table',
+        r';\s*delete\s+from',
+        r';\s*insert\s+into',
+        r';\s*update\s+\w+\s+set',
+        r'union\s+select',
+        r'or\s+1\s*=\s*1',
+        r'and\s+1\s*=\s*1',
+        r'or\s+\'1\'\s*=\s*\'1\'',
+        r'and\s+\'1\'\s*=\s*\'1\'',
+        r'--\s*$',  # SQL comments
+        r'/\*.*?\*/',  # SQL block comments
+        r';\s*exec\s*\(',
+        r';\s*sp_',
+        r'xp_cmdshell',
+        r';\s*shutdown',
+    ]
+    
+    # Check for path traversal patterns
+    path_patterns = [
+        r'\.\./+',
+        r'\.\.\\+',
+        r'/etc/passwd',
+        r'/proc/self',
+        r'c:\\windows',
+        r'%2e%2e%2f',  # URL encoded ../
+        r'%2e%2e%5c',  # URL encoded ..\
+    ]
+    
+    # Check for command injection patterns
+    command_patterns = [
+        r';\s*cat\s+',
+        r';\s*ls\s+',
+        r';\s*dir\s+',
+        r';\s*rm\s+',
+        r';\s*del\s+',
+        r';\s*curl\s+',
+        r';\s*wget\s+',
+        r';\s*nc\s+',
+        r';\s*netcat\s+',
+        r'`[^`]*`',  # Backticks for command substitution
+        r'\$\([^)]*\)',  # Command substitution
+    ]
+    
+    all_patterns = xss_patterns + sql_patterns + path_patterns + command_patterns
+    
+    for pattern in all_patterns:
+        if re.search(pattern, value_lower, re.IGNORECASE):
+            logger.warning(f"Potentially malicious input detected in {field_name}: {pattern}")
+            return False
+    
+    # Check for suspicious character sequences
+    suspicious_chars = ['<script', '</script>', 'javascript:', 'vbscript:', 'data:', 'onload=', 'onerror=']
+    for char_seq in suspicious_chars:
+        if char_seq in value_lower:
+            logger.warning(f"Suspicious character sequence detected in {field_name}: {char_seq}")
+            return False
+    
+    return True
+
+@monitor_memory
+def validate_card_input(card_number: str = None, card_rarity: str = None, card_name: str = None, art_variant: str = None) -> tuple[bool, str]:
+    """
+    Validate card input parameters for security and format.
+    
+    Args:
+        card_number: Card number to validate
+        card_rarity: Card rarity to validate  
+        card_name: Card name to validate
+        art_variant: Art variant to validate
+        
+    Returns:
+        tuple[bool, str]: (is_valid, error_message)
+    """
+    # Validate card_number if provided
+    if card_number:
+        if not validate_input_security(card_number, "card_number"):
+            return False, "Invalid card number: contains potentially malicious content"
+        
+        # Basic format validation for card numbers
+        if len(card_number) > 50:  # Reasonable length limit
+            return False, "Invalid card number: too long"
+            
+        # Card numbers should only contain alphanumeric characters, hyphens, and underscores
+        if not re.match(r'^[A-Za-z0-9\-_]+$', card_number):
+            return False, "Invalid card number: contains invalid characters"
+    
+    # Validate card_rarity if provided
+    if card_rarity:
+        if not validate_input_security(card_rarity, "card_rarity"):
+            return False, "Invalid card rarity: contains potentially malicious content"
+            
+        # Length validation
+        if len(card_rarity) > 100:  # Reasonable length limit
+            return False, "Invalid card rarity: too long"
+            
+        # Rarity should only contain letters, spaces, apostrophes, and common punctuation
+        if not re.match(r'^[A-Za-z0-9\s\'\-\.\/\(\)]+$', card_rarity):
+            return False, "Invalid card rarity: contains invalid characters"
+    
+    # Validate card_name if provided
+    if card_name:
+        if not validate_input_security(card_name, "card_name"):
+            return False, "Invalid card name: contains potentially malicious content"
+            
+        # Length validation
+        if len(card_name) > 200:  # Reasonable length limit
+            return False, "Invalid card name: too long"
+    
+    # Validate art_variant if provided
+    if art_variant:
+        if not validate_input_security(art_variant, "art_variant"):
+            return False, "Invalid art variant: contains potentially malicious content"
+            
+        # Length validation
+        if len(art_variant) > 100:  # Reasonable length limit
+            return False, "Invalid art variant: too long"
+    
+    return True, ""
+
+@monitor_memory
 def parse_price_string(price_str: str) -> Optional[float]:
     """
     Parse price string to float.
@@ -668,10 +826,12 @@ def parse_price_string(price_str: str) -> Optional[float]:
     
     return None
 
+@monitor_memory
 def get_current_utc_datetime() -> datetime:
     """Get current UTC datetime."""
     return datetime.now(timezone.utc)
 
+@monitor_memory
 def format_datetime_for_api(dt: datetime) -> str:
     """Format datetime for API response."""
     return dt.strftime("%a, %d %b %Y %H:%M:%S GMT") if dt else ""

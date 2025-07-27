@@ -727,17 +727,58 @@ class PriceScrapingService:
                 
                 await page.goto(search_url, wait_until='networkidle', timeout=60000)
                 
-                # Check if we got results
-                results_count = await page.evaluate("""
-                    () => {
-                        const resultText = document.querySelector('h1')?.textContent || '';
-                        const match = resultText.match(/(\\d+)\\s+results?\\s+for/);
-                        return match ? parseInt(match[1]) : 0;
-                    }
-                """)
+                # FIXED: Wait for dynamic search results to load properly
+                # TCGPlayer loads results asynchronously, so we need to wait for them to appear
+                results_count = 0
+                max_wait_attempts = 12  # Wait up to ~12 seconds (12 * 1000ms)
+                wait_interval = 1000   # Check every 1 second
+                
+                for attempt in range(max_wait_attempts):
+                    # Check if we got results
+                    results_count = await page.evaluate("""
+                        () => {
+                            // Check multiple possible selectors for results count
+                            const selectors = [
+                                'h1', 
+                                '[data-testid="results-count"]',
+                                '.search-results-count',
+                                '.results-summary'
+                            ];
+                            
+                            for (const selector of selectors) {
+                                const element = document.querySelector(selector);
+                                if (element) {
+                                    const text = element.textContent || '';
+                                    const match = text.match(/(\\d+)\\s+results?\\s+for/i);
+                                    if (match) {
+                                        return parseInt(match[1]);
+                                    }
+                                }
+                            }
+                            
+                            // Also check if there are visible product links (alternative indicator of results)
+                            const productLinks = document.querySelectorAll('a[href*="/product/"]');
+                            const visibleLinks = Array.from(productLinks).filter(link => {
+                                const style = window.getComputedStyle(link);
+                                return style.display !== 'none' && style.visibility !== 'hidden' && 
+                                       link.offsetHeight > 0 && link.offsetWidth > 0;
+                            });
+                            
+                            return visibleLinks.length;
+                        }
+                    """)
+                    
+                    if results_count > 0:
+                        logger.info(f"✓ Found {results_count} results after {attempt + 1} attempts ({(attempt + 1) * wait_interval / 1000:.1f}s)")
+                        break
+                    
+                    # If this is not the last attempt, wait before trying again
+                    if attempt < max_wait_attempts - 1:
+                        logger.debug(f"Attempt {attempt + 1}: No results yet, waiting {wait_interval}ms before retry...")
+                        await page.wait_for_timeout(wait_interval)
                 
                 if results_count == 0:
-                    logger.warning(f"No results found for {card_name}")
+                    logger.warning(f"No results found for {card_name} after waiting {max_wait_attempts * wait_interval / 1000:.1f} seconds")
                     await browser.close()
                     return {
                         "tcgplayer_price": None,
