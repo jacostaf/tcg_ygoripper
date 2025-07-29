@@ -9,6 +9,8 @@ import asyncio
 import logging
 import re
 import threading
+import time
+import random
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any, Tuple
@@ -60,7 +62,7 @@ class PriceScrapingService:
         self.cache_collection = None
         self.variants_collection = None
         self._initialized = False
-        self._scraping_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="price_scraper")
+        self._scraping_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="price_scraper")
         self._async_loop_lock = threading.Lock()
         # Register cleanup callback with memory manager
         self.memory_manager.register_cleanup_callback("price_scraper_cleanup", self.cleanup_resources)
@@ -107,6 +109,11 @@ class PriceScrapingService:
             asyncio.set_event_loop(loop)
             
             try:
+                # Add small random delay to stagger concurrent browser launches
+                delay = random.uniform(0.1, 0.5)
+                time.sleep(delay)
+                logger.info(f"Delayed {delay:.2f}s before browser launch for {card_name}")
+                
                 # Run the async function in this thread's event loop
                 result = loop.run_until_complete(
                     self.scrape_price_from_tcgplayer_basic(card_name, card_rarity, art_variant, card_number)
