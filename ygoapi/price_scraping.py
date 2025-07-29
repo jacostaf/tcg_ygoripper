@@ -52,7 +52,7 @@ from .utils import (
     map_set_code_to_tcgplayer_name
 )
 from .memory_manager import monitor_memory, get_memory_manager
-from .browser_pool import browser_pool
+from .browser_manager import browser_manager
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +100,7 @@ class PriceScrapingService:
                 import asyncio
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                loop.run_until_complete(browser_pool.cleanup())
+                # No cleanup needed for browser manager - each browser is closed after use
                 loop.close()
                 logger.info("Browser pool cleaned up")
             except Exception as e:
@@ -1005,7 +1005,7 @@ class PriceScrapingService:
                 art_variant = extract_art_version(card_name)
             
             # Acquire browser from pool
-            async with browser_pool.acquire_browser() as browser:
+            async with browser_manager.create_browser() as browser:
                 # Create new context for this request
                 context = await browser.new_context(
                     user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
