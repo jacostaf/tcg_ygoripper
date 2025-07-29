@@ -7,6 +7,7 @@ This module provides synchronous price scraping functionality with memory optimi
 
 import asyncio
 import logging
+import os
 import re
 import threading
 import time
@@ -51,6 +52,7 @@ from .utils import (
     map_set_code_to_tcgplayer_name
 )
 from .memory_manager import monitor_memory, get_memory_manager
+from .browser_pool import browser_pool
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +64,13 @@ class PriceScrapingService:
         self.cache_collection = None
         self.variants_collection = None
         self._initialized = False
-        self._scraping_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="price_scraper")
+        
+        # Get max workers from env var, default to 2
+        # This should match PLAYWRIGHT_POOL_SIZE for optimal performance
+        max_workers = int(os.environ.get('PRICE_SCRAPING_MAX_WORKERS', '2'))
+        logger.info(f"Initializing ThreadPoolExecutor with {max_workers} workers")
+        self._scraping_executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="price_scraper")
+        
         self._async_loop_lock = threading.Lock()
         # Register cleanup callback with memory manager
         self.memory_manager.register_cleanup_callback("price_scraper_cleanup", self.cleanup_resources)
@@ -86,13 +94,24 @@ class PriceScrapingService:
                     logger.warning(f"Error shutting down executor: {e}")
                 finally:
                     self._scraping_executor = None
+            
+            # Cleanup browser pool
+            try:
+                import asyncio
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(browser_pool.cleanup())
+                loop.close()
+                logger.info("Browser pool cleaned up")
+            except Exception as e:
+                logger.warning(f"Error cleaning up browser pool: {e}")
                     
             # Force garbage collection
             import gc
             gc.collect()
             
             logger.info("Price scraping resources cleaned up")
-            
+                
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
     
@@ -116,7 +135,7 @@ class PriceScrapingService:
                 
                 # Run the async function in this thread's event loop
                 result = loop.run_until_complete(
-                    self.scrape_price_from_tcgplayer_basic(card_name, card_rarity, art_variant, card_number)
+                    self.scrape_price_from_tcgplayer_pooled(card_name, card_rarity, art_variant, card_number)
                 )
                 
                 logger.info(f"✅ Threaded async scraping completed for {card_name}: {result.get('tcgplayer_price', 'No price')} / {result.get('tcgplayer_market_price', 'No market price')}")
@@ -956,6 +975,176 @@ class PriceScrapingService:
                 }
                 
         except Exception as e:
+            logger.error(f"Error scraping price from TCGPlayer: {e}")
+            return {
+                "tcgplayer_price": None,
+                "tcgplayer_market_price": None,
+                "tcgplayer_url": None,
+                "tcgplayer_product_id": None,
+                "tcgplayer_variant_selected": None,
+                "error": str(e)
+            }
+    
+    @monitor_memory
+    async def scrape_price_from_tcgplayer_pooled(
+        self,
+        card_name: str,
+        card_rarity: str,
+        art_variant: Optional[str] = None,
+        card_number: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Price scraping from TCGPlayer using browser pool for efficiency.
+        This version reuses browser instances from a pool instead of launching new ones.
+        """
+        try:
+            logger.info(f"Scraping price for {card_name} ({card_rarity}) using browser pool")
+            
+            # Extract art version from card name if not provided
+            if not art_variant and card_name:
+                art_variant = extract_art_version(card_name)
+            
+            # Acquire browser from pool
+            async with browser_pool.acquire_browser() as browser:
+                # Create new context for this request
+                context = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+                )
+                
+                try:
+                    # Configure context timeouts
+                    context.set_default_timeout(PLAYWRIGHT_DEFAULT_TIMEOUT_MS)
+                    context.set_default_navigation_timeout(PLAYWRIGHT_NAVIGATION_TIMEOUT_MS)
+                    
+                    page = await context.new_page()
+                    
+                    # Set page-specific timeouts
+                    page.set_default_timeout(PLAYWRIGHT_PAGE_TIMEOUT_MS)
+                    page.set_default_navigation_timeout(PLAYWRIGHT_NAVIGATION_TIMEOUT_MS)
+                    
+                    # Build search URL
+                    search_card_name = card_name
+                    
+                    # Include art variant in search if provided
+                    if art_variant:
+                        art_search_terms = []
+                        
+                        if art_variant.isdigit():
+                            art_search_terms = [
+                                f"{card_name} {art_variant}th art",
+                                f"{card_name} {art_variant}th",
+                                f"{card_name} {art_variant}",
+                            ]
+                        elif art_variant.lower() in ["arkana", "kaiba", "joey wheeler", "pharaoh"]:
+                            art_search_terms = [
+                                f"{card_name} {art_variant}",
+                                f"{card_name}-{art_variant}",
+                            ]
+                        else:
+                            art_search_terms = [
+                                f"{card_name} {art_variant}",
+                                f"{card_name} {art_variant} art",
+                            ]
+                        
+                        if art_search_terms:
+                            search_card_name = art_search_terms[0]
+                            logger.info(f"Searching with art variant: '{search_card_name}'")
+                    
+                    search_url = f"https://www.tcgplayer.com/search/yugioh/product?Language=English&productLineName=yugioh&q={quote(search_card_name)}&view=grid"
+                    
+                    # Add rarity filter
+                    if card_rarity:
+                        tcgplayer_rarity_filter = map_rarity_to_tcgplayer_filter(card_rarity)
+                        if tcgplayer_rarity_filter:
+                            search_url += f"&Rarity={quote(tcgplayer_rarity_filter)}"
+                    
+                    # Add set filtering
+                    if card_number:
+                        set_code = extract_set_code(card_number)
+                        if set_code:
+                            tcgplayer_set_name = map_set_code_to_tcgplayer_name(set_code)
+                            if tcgplayer_set_name:
+                                search_url += f"&setName={quote(tcgplayer_set_name)}"
+                                logger.info(f"Added set filter: {set_code} -> {tcgplayer_set_name}")
+                    
+                    logger.info(f"Searching TCGPlayer: {search_url}")
+                    
+                    # Navigate to search page
+                    await page.goto(search_url, wait_until='networkidle', timeout=PLAYWRIGHT_NAVIGATION_TIMEOUT_MS)
+                    
+                    # Wait for search results
+                    results_count = await self._wait_for_search_results(page, card_name)
+                    
+                    if results_count == 0:
+                        logger.warning(f"No results found for {card_name}")
+                        return {
+                            "tcgplayer_price": None,
+                            "tcgplayer_market_price": None,
+                            "tcgplayer_url": None,
+                            "tcgplayer_product_id": None,
+                            "tcgplayer_variant_selected": None,
+                            "error": "No results found on TCGPlayer"
+                        }
+                    
+                    # Check if on product page or search results
+                    is_product_page = await page.evaluate("() => document.querySelector('.product-details, .product-title, h1[data-testid=\"product-name\"]') !== null")
+                    
+                    if not is_product_page:
+                        # Select best variant
+                        best_variant_url = await self.select_best_tcgplayer_variant(
+                            page, card_number, card_name, card_rarity, art_variant
+                        )
+                        
+                        if best_variant_url:
+                            logger.info(f"Selected variant: {best_variant_url}")
+                            await page.goto(best_variant_url, wait_until='networkidle', timeout=PLAYWRIGHT_NAVIGATION_TIMEOUT_MS)
+                        else:
+                            logger.warning(f"No suitable variant found")
+                            return {
+                                "tcgplayer_price": None,
+                                "tcgplayer_market_price": None,
+                                "tcgplayer_url": None,
+                                "tcgplayer_product_id": None,
+                                "tcgplayer_variant_selected": None,
+                                "error": "No suitable variant found"
+                            }
+                    
+                    # Wait for price data to load (from memory fix)
+                    try:
+                        await page.wait_for_selector('table', state='visible', timeout=5000)
+                        await page.wait_for_timeout(1000)  # Additional wait for dynamic content
+                    except:
+                        logger.warning("Price table not found, attempting extraction anyway")
+                    
+                    # Extract prices
+                    price_data = await self.extract_prices_from_tcgplayer_dom(page)
+                    
+                    # Get final URL
+                    final_url = page.url
+                    
+                    return {
+                        "tcgplayer_price": price_data.get('tcg_price'),
+                        "tcgplayer_market_price": price_data.get('tcg_market_price'),
+                        "tcgplayer_url": final_url,
+                        "tcgplayer_product_id": None,
+                        "tcgplayer_variant_selected": None
+                    }
+                    
+                finally:
+                    # Always close context to prevent resource leaks
+                    await context.close()
+                
+        except Exception as e:
+            logger.error(f"Error in pooled scraping: {e}")
+            return {
+                "tcgplayer_price": None,
+                "tcgplayer_market_price": None,
+                "tcgplayer_url": None,
+                "tcgplayer_product_id": None,
+                "tcgplayer_variant_selected": None,
+                "error": str(e)
+            }
+
             logger.error(f"Error scraping price from TCGPlayer: {e}")
             return {
                 "tcgplayer_price": None,

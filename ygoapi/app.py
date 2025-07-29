@@ -5,9 +5,12 @@ Initializes and configures the Flask application with all modules and services.
 This module replaces the original main.py file with a modular architecture.
 """
 
+import json
 import logging
 import os
-
+import signal
+import sys
+from datetime import datetime
 from flask import Flask
 from flask_cors import CORS
 
@@ -132,11 +135,16 @@ def run_app():
 
         print(f"Starting Waitress WSGI server on port {port}...")
         print("Running in production mode (debug=False)")
+        # Get thread count from env var, default to 3
+        # This can be higher than PRICE_SCRAPING_MAX_WORKERS since not all requests do scraping
+        waitress_threads = int(os.environ.get('WAITRESS_THREADS', '3'))
+        print(f"Configuring Waitress with {waitress_threads} threads")
+        
         serve(
             app,
             host="0.0.0.0",
             port=port,
-            threads=3,  # Increased from 2 to 3 for better concurrency
+            threads=waitress_threads,
             connection_limit=30,
             cleanup_interval=60,  # More frequent cleanup
             channel_timeout=3600000,  # Timeout for idle connections
