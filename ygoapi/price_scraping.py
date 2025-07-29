@@ -1109,12 +1109,31 @@ class PriceScrapingService:
                                 "error": "No suitable variant found"
                             }
                     
-                    # Wait for price data to load (from memory fix)
+                    # Wait for price data to load - wait for market price elements
                     try:
-                        await page.wait_for_selector('table', state='visible', timeout=5000)
-                        await page.wait_for_timeout(1000)  # Additional wait for dynamic content
-                    except:
-                        logger.warning("Price table not found, attempting extraction anyway")
+                        # Wait for any element containing market price text
+                        await page.wait_for_function(
+                            """() => {
+                                const elements = Array.from(document.querySelectorAll('*'));
+                                return elements.some(el => {
+                                    const text = el.textContent?.toLowerCase() || '';
+                                    return (text.includes('market price') || text.includes('tcg low')) && text.includes('$');
+                                });
+                            }""",
+                            timeout=10000
+                        )
+                        # Additional wait for dynamic content to fully render
+                        await page.wait_for_timeout(2000)
+                        logger.info("Price data elements found")
+                    except Exception as e:
+                        logger.warning(f"Timeout waiting for price elements: {e}")
+                        # Take a screenshot for debugging
+                        try:
+                            screenshot_path = f"/tmp/debug_screenshot_{card_number or card_name}.png"
+                            await page.screenshot(path=screenshot_path)
+                            logger.info(f"Debug screenshot saved: {screenshot_path}")
+                        except:
+                            pass
                     
                     # Extract prices
                     price_data = await self.extract_prices_from_tcgplayer_dom(page)
