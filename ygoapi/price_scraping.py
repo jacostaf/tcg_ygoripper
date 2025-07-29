@@ -1120,7 +1120,7 @@ class PriceScrapingService:
                                     return (text.includes('market price') || text.includes('tcg low')) && text.includes('$');
                                 });
                             }""",
-                            timeout=10000
+                            timeout=1000000
                         )
                         # Additional wait for dynamic content to fully render
                         await page.wait_for_timeout(2000)
