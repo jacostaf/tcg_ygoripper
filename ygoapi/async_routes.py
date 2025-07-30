@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from quart import Blueprint, jsonify, request, current_app
 
 from .async_browser_pool import get_browser_pool
+from .browser_strategy import get_browser_strategy
 from .async_price_scraping import get_async_price_service
 from .card_services import card_set_service, card_variant_service, card_lookup_service
 from .config import get_debug_mode, API_RATE_LIMIT_DELAY, YGO_API_BASE_URL
@@ -27,9 +28,16 @@ def register_async_routes(app):
     @app.route('/health', methods=['GET'])
     async def health_check():
         """Health check endpoint."""
-        # Get browser pool stats
-        browser_pool = get_browser_pool()
-        browser_stats = await browser_pool.get_stats()
+        # Get browser stats based on strategy
+        browser_strategy = get_browser_strategy()
+        if browser_strategy == 'pool':
+            browser_pool = get_browser_pool()
+            browser_stats = await browser_pool.get_stats()
+        else:
+            browser_stats = {
+                "strategy": "manager",
+                "message": "Using BrowserManager for memory efficiency"
+            }
         
         return jsonify({
             "status": "healthy",
@@ -195,10 +203,19 @@ def register_async_routes(app):
     # Browser pool stats route
     @app.route('/browser/stats', methods=['GET'])
     async def browser_pool_stats():
-        """Get browser pool statistics."""
+        """Get browser statistics."""
         try:
-            browser_pool = get_browser_pool()
-            stats = await browser_pool.get_stats()
+            browser_strategy = get_browser_strategy()
+            
+            if browser_strategy == 'pool':
+                browser_pool = get_browser_pool()
+                stats = await browser_pool.get_stats()
+            else:
+                stats = {
+                    "strategy": "manager",
+                    "pool_size": int(os.getenv('PLAYWRIGHT_POOL_SIZE', '2')),
+                    "message": "Using BrowserManager - browsers created on demand"
+                }
             
             return jsonify({
                 "success": True,

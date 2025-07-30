@@ -60,9 +60,13 @@ MONGODB_CONNECTION_STRING=mongodb+srv://your-connection-string
 # Playwright Configuration
 PLAYWRIGHT_POOL_SIZE=2              # Browser pool size (2 for 512MB instances)
 PLAYWRIGHT_HEADLESS=true           # Always true for servers
-HYPERCORN_WORKERS=1                 # Single worker for async operation
 PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/.playwright  # Browser install path
 PLAYWRIGHT_MAX_USES_PER_BROWSER=50  # Recycle browser after 50 uses
+
+# Browser Strategy (Optional - auto-detects)
+# BROWSER_STRATEGY=manager          # Force BrowserManager (memory-efficient)
+# BROWSER_STRATEGY=pool            # Force BrowserPool (performance-optimized)
+# Leave unset to auto-detect (uses 'manager' on Render)
 
 # API Configuration
 PRICE_CACHE_DURATION_HOURS=12       # Cache duration

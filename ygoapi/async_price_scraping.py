@@ -15,6 +15,8 @@ from urllib.parse import quote
 import aiohttp
 
 from .async_browser_pool import get_browser_pool, AsyncBrowserPool
+from .browser_manager import BrowserManager
+from .browser_strategy import get_browser_strategy
 from .config import (
     PLAYWRIGHT_DEFAULT_TIMEOUT_MS,
     PLAYWRIGHT_NAVIGATION_TIMEOUT_MS,
@@ -40,11 +42,20 @@ class AsyncPriceScrapingService:
     
     def __init__(self):
         self.db = get_database()
-        self.browser_pool = get_browser_pool()
+        
+        # Select browser strategy based on environment
+        self.browser_strategy = get_browser_strategy()
+        if self.browser_strategy == 'pool':
+            self.browser_pool = get_browser_pool()
+            self.browser_manager = None
+        else:
+            self.browser_pool = None
+            self.browser_manager = BrowserManager()
+        
         self._ygo_api_cache = {}
         self._price_cache_ttl = timedelta(hours=24)
         
-        logger.info("AsyncPriceScrapingService initialized")
+        logger.info(f"AsyncPriceScrapingService initialized with {self.browser_strategy} strategy")
     
     async def scrape_card_price(
         self,
@@ -221,17 +232,43 @@ class AsyncPriceScrapingService:
         card_number: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Scrape price from TCGPlayer using the browser pool.
+        Scrape price from TCGPlayer using the configured browser strategy.
         """
         try:
-            logger.info(f"Scraping price for {card_name} ({card_rarity}) using browser pool")
+            logger.info(f"Scraping price for {card_name} ({card_rarity}) using {self.browser_strategy} strategy")
             
             # Extract art version from card name if not provided
             if not art_variant and card_name:
                 art_variant = extract_art_version(card_name)
             
-            # Acquire browser context from pool
-            async with self.browser_pool.acquire_context() as context:
+            # Use appropriate browser strategy
+            if self.browser_strategy == 'pool':
+                # Use browser pool for performance
+                async with self.browser_pool.acquire_context() as context:
+                    return await self._scrape_with_context(context, card_name, card_rarity, art_variant, card_number)
+            else:
+                # Use browser manager for memory efficiency
+                async with self.browser_manager.acquire_browser() as browser:
+                    context = await browser.new_context()
+                    try:
+                        return await self._scrape_with_context(context, card_name, card_rarity, art_variant, card_number)
+                    finally:
+                        await context.close()
+                        
+        except Exception as e:
+            logger.error(f"Error in async scraping: {e}")
+            return {
+                "tcgplayer_price": None,
+                "tcgplayer_market_price": None,
+                "tcgplayer_url": None,
+                "tcgplayer_product_id": None,
+                "tcgplayer_variant_selected": None,
+                "error": str(e)
+            }
+    
+    async def _scrape_with_context(self, context, card_name: str, card_rarity: str, art_variant: Optional[str], card_number: Optional[str]) -> Dict[str, Any]:
+        """Perform the actual scraping with a browser context."""
+        try:
                 # Configure context timeouts
                 context.set_default_timeout(PLAYWRIGHT_DEFAULT_TIMEOUT_MS)
                 context.set_default_navigation_timeout(PLAYWRIGHT_NAVIGATION_TIMEOUT_MS)
@@ -355,7 +392,7 @@ class AsyncPriceScrapingService:
                 return result
                 
         except Exception as e:
-            logger.error(f"Error in async scraping: {e}")
+            logger.error(f"Error in scraping with context: {e}")
             return {
                 "tcgplayer_price": None,
                 "tcgplayer_market_price": None,

@@ -11,8 +11,8 @@ import concurrent.futures
 import time
 
 # Render deployment URLs
-DEBUG_URL = ""
-PRICE_URL = ""
+DEBUG_URL = "https://ygopyguy.onrender.com/debug/price-extraction"
+PRICE_URL = "https://ygopyguy.onrender.com/cards/price"
 
 # Test cards - one that works and one that fails
 test_cards = [
