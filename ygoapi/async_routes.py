@@ -5,6 +5,7 @@ This module defines all the async API routes using Quart.
 """
 
 import logging
+import os
 from datetime import datetime, timezone
 from quart import Blueprint, jsonify, request, current_app
 
