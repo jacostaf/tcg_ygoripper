@@ -16,6 +16,7 @@ import aiohttp
 
 from .async_browser_pool import get_browser_pool, AsyncBrowserPool
 from .browser_manager import BrowserManager
+from .optimized_browser_pool import get_optimized_browser_pool
 from .browser_strategy import get_browser_strategy
 from .config import (
     PLAYWRIGHT_DEFAULT_TIMEOUT_MS,
@@ -48,9 +49,15 @@ class AsyncPriceScrapingService:
         if self.browser_strategy == 'pool':
             self.browser_pool = get_browser_pool()
             self.browser_manager = None
+            self.optimized_pool = None
+        elif self.browser_strategy == 'optimized':
+            self.browser_pool = None
+            self.browser_manager = None
+            self.optimized_pool = get_optimized_browser_pool()
         else:
             self.browser_pool = None
             self.browser_manager = BrowserManager()
+            self.optimized_pool = None
         
         self._ygo_api_cache = {}
         self._price_cache_ttl = timedelta(hours=24)
@@ -245,6 +252,10 @@ class AsyncPriceScrapingService:
             if self.browser_strategy == 'pool':
                 # Use browser pool for performance
                 async with self.browser_pool.acquire_context() as context:
+                    return await self._scrape_with_context(context, card_name, card_rarity, art_variant, card_number)
+            elif self.browser_strategy == 'optimized':
+                # Use optimized pool with memory awareness
+                async with self.optimized_pool.acquire_context() as context:
                     return await self._scrape_with_context(context, card_name, card_rarity, art_variant, card_number)
             else:
                 # Use browser manager for memory efficiency

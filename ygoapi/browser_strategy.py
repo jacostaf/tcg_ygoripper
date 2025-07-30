@@ -17,19 +17,20 @@ def get_browser_strategy() -> str:
     Determine the best browser strategy based on environment.
     
     Returns:
-        'manager' for memory-constrained environments
-        'pool' for performance-optimized environments
+        'pool' for BrowserPool (performance-optimized)
+        'manager' for BrowserManager (memory-efficient)
+        'optimized' for OptimizedBrowserPool (memory-aware)
     """
+    # Check for explicit override
+    strategy = os.getenv('BROWSER_STRATEGY', '').lower()
+    if strategy in ['pool', 'manager', 'optimized']:
+        logger.info(f"Using explicitly set browser strategy: {strategy}")
+        return strategy
+    
     # Check if we're on Render
     if os.getenv('RENDER'):
         logger.info("Detected Render environment - using Browser Manager for memory efficiency")
         return 'manager'
-    
-    # Check if explicitly set
-    strategy = os.getenv('BROWSER_STRATEGY', '').lower()
-    if strategy in ['manager', 'pool']:
-        logger.info(f"Using explicitly set browser strategy: {strategy}")
-        return strategy
     
     # Check memory limit if available
     memory_limit_mb = int(os.getenv('MEMORY_LIMIT_MB', '0'))
