@@ -35,7 +35,7 @@ This guide explains how to deploy the YGO API with async Playwright browser pool
   ```
 - **Start Command**:
   ```bash
-  hypercorn ygoapi.async_app:create_async_app --bind 0.0.0.0:$PORT --workers 1
+  hypercorn ygoapi.async_app:app --bind 0.0.0.0:$PORT --workers 1
   ```
 
 ### Instance Type

@@ -155,5 +155,8 @@ async def run_async_app():
         await serve(app, config)
 
 
+# Create app instance for Hypercorn
+app = create_async_app()
+
 if __name__ == "__main__":
     asyncio.run(run_async_app())
