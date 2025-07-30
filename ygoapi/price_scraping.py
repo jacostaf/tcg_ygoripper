@@ -1295,6 +1295,27 @@ class PriceScrapingService:
                         **price_data
                     }
                     self.save_price_data(full_price_data, art_variant)
+                    
+                    # If prices are null, check if we have valid data in cache/DB
+                    # This handles cases where scraping succeeds but price extraction fails
+                    if price_data.get('tcgplayer_price') is None or price_data.get('tcgplayer_market_price') is None:
+                        logger.info(f"⚠️ Null prices detected after scraping for {card_number} - checking cache for existing data")
+                        cached_data = self._find_cached_price_data_with_staleness_info(
+                            card_number, card_name, card_rarity, art_variant
+                        )
+                        if cached_data and cached_data["data"].get('tcgplayer_price') is not None:
+                            logger.info(f"✓ Found valid prices in cache for {card_number} - returning cached data instead of nulls")
+                            cleaned_data = clean_card_data(cached_data["data"])
+                            return {
+                                "success": True,
+                                "card_number": card_number,
+                                "card_name": card_name,
+                                "card_rarity": card_rarity,
+                                "art_variant": art_variant,
+                                "cached": True,
+                                "last_updated": cached_data["data"].get('last_price_updt'),
+                                **cleaned_data
+                            }
                 else:
                     logger.warning(f"Price scraping failed for {card_number}: {price_data.get('error', 'Unknown error')}")
                 
