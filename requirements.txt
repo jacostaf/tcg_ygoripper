@@ -20,6 +20,12 @@ waitress>=2.1.2,<3.0.0  # Production WSGI server
 flask>=2.3.3,<4.0.0
 flask-cors>=4.0.0,<5.0.0  # For handling CORS in the API
 
+# Async Web Framework (for browser pooling)
+quart>=0.19.0,<1.0.0  # Async Flask-compatible framework
+quart-cors>=0.7.0,<1.0.0  # CORS support for Quart
+hypercorn>=0.16.0,<1.0.0  # ASGI server for Quart
+aiohttp>=3.9.0,<4.0.0  # Async HTTP client
+
 # Database
 pymongo[srv]>=4.6.0,<5.0.0  # MongoDB driver with SRV support
 
