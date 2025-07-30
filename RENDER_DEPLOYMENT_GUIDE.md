@@ -26,7 +26,12 @@ This guide explains how to deploy the YGO API with async Playwright browser pool
 - **Runtime**: Python 3
 - **Build Command**: 
   ```bash
-  pip install -r requirements.txt && playwright install chromium && playwright install-deps
+  ./build_async_render.sh
+  ```
+  
+  Or if that fails, use the minimal version:
+  ```bash
+  ./build_minimal.sh
   ```
 - **Start Command**:
   ```bash
