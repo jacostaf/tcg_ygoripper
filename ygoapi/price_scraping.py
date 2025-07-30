@@ -1740,6 +1740,18 @@ class PriceScrapingService:
                 }
             """)
             
+            # Add debug logging
+            logger.info(f"Price extraction result: tcg_price=${prices.get('tcg_price')}, market=${prices.get('tcg_market_price')}")
+            if prices.get('tcg_price') is None or prices.get('tcg_market_price') is None:
+                logger.warning(f"NULL PRICES DETECTED during extraction - debug_info: {prices.get('debug_info', [])}")
+                # Try to capture page content for debugging
+                try:
+                    page_title = await page.title()
+                    page_url = page.url
+                    logger.warning(f"Page title: {page_title}, URL: {page_url}")
+                except:
+                    pass
+            
             return prices
             
         except Exception as e:
