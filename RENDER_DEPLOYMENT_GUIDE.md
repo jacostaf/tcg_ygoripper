@@ -37,6 +37,11 @@ This guide explains how to deploy the YGO API with async Playwright browser pool
   ```bash
   hypercorn ygoapi.async_app:app --bind 0.0.0.0:$PORT --workers 1
   ```
+  
+  Or if that fails, use Python directly for better error messages:
+  ```bash
+  python run_async.py
+  ```
 
 ### Instance Type
 - **Plan**: Select based on your needs

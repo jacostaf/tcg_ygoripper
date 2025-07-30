@@ -156,7 +156,17 @@ async def run_async_app():
 
 
 # Create app instance for Hypercorn
-app = create_async_app()
+try:
+    app = create_async_app()
+except Exception as e:
+    # If app creation fails, create a minimal app that can start
+    print(f"Warning: Failed to create full app: {e}")
+    print("Creating minimal app...")
+    app = Quart(__name__)
+    
+    @app.route("/health")
+    async def health():
+        return {"status": "error", "message": str(e)}, 500
 
 if __name__ == "__main__":
     asyncio.run(run_async_app())
