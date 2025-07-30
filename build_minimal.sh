@@ -10,7 +10,8 @@ echo "=== Minimal Async Build ==="
 pip install --upgrade pip
 pip install -r requirements.txt
 pip install playwright
+
+# Install chromium without system deps (Render provides them)
 playwright install chromium
-playwright install-deps chromium
 
 echo "=== Build complete ==="

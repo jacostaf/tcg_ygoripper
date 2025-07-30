@@ -37,18 +37,10 @@ echo ""
 echo "=== Installing Playwright ==="
 pip install playwright
 
-# Install Chromium and its dependencies
+# Install Chromium browser
 echo ""
 echo "=== Installing Chromium browser ==="
-# Set Playwright to skip browser downloads if we're going to install via apt
-export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-
-# Install system dependencies for Chromium
-echo "Installing system dependencies..."
-playwright install-deps chromium
-
-# Now install Chromium via Playwright
-unset PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD
+# Render provides system dependencies, we only need the browser binary
 playwright install chromium
 
 # Verify installation

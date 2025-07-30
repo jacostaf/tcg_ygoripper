@@ -26,10 +26,10 @@ This guide explains how to deploy the YGO API with async Playwright browser pool
 - **Runtime**: Python 3
 - **Build Command**: 
   ```bash
-  ./build_async_render.sh
+  ./render_build.sh
   ```
   
-  Or if that fails, use the minimal version:
+  Or use the minimal version:
   ```bash
   ./build_minimal.sh
   ```
@@ -53,9 +53,10 @@ Add the following environment variables in Render:
 MONGODB_CONNECTION_STRING=mongodb+srv://your-connection-string
 
 # Playwright Configuration
-PLAYWRIGHT_POOL_SIZE=2              # Keep at 2 for 512MB instances
-PLAYWRIGHT_HEADLESS=true            # Must be true for Render
-PLAYWRIGHT_TIMEOUT=30000            # 30 second timeout
+PLAYWRIGHT_POOL_SIZE=2              # Browser pool size (2 for 512MB instances)
+PLAYWRIGHT_HEADLESS=true           # Always true for servers
+HYPERCORN_WORKERS=1                 # Single worker for async operation
+PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/.playwright  # Browser install path
 PLAYWRIGHT_MAX_USES_PER_BROWSER=50  # Recycle browser after 50 uses
 
 # API Configuration
