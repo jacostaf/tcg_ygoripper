@@ -117,21 +117,32 @@ class PriceScrapingService:
     
     def _run_async_scraping_in_thread(self, card_name: str, card_rarity: str, art_variant: Optional[str], card_number: Optional[str]) -> Dict[str, Any]:
         """
-        Run async scraping in a dedicated thread with proper event loop handling.
-        This prevents race conditions when multiple requests come in parallel.
+        Run the async scraping function in a new thread with its own event loop.
+        This prevents event loop conflicts when called from sync contexts.
         """
+        import asyncio
+        import time
+        import random
+        
         try:
-            logger.info(f"🔄 Starting threaded async scraping for {card_name} ({card_rarity})")
-            
             # Create a new event loop for this thread
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             
             try:
-                # Add small random delay to stagger concurrent browser launches
-                delay = random.uniform(0.1, 0.5)
+                # Stagger requests based on current concurrency level
+                current_pool_size = int(os.getenv('PLAYWRIGHT_POOL_SIZE', '2'))
+                if current_pool_size > 2:
+                    # For higher concurrency, add more staggering to prevent resource exhaustion
+                    base_delay = 1.0 * (current_pool_size - 2)  # 1 second per browser over 2
+                    delay = random.uniform(0.1, base_delay)
+                    logger.info(f"High concurrency detected ({current_pool_size} browsers) - delaying {delay:.2f}s for {card_name}")
+                else:
+                    # Normal staggering for low concurrency
+                    delay = random.uniform(0.1, 0.5)
+                    logger.info(f"Delayed {delay:.2f}s before browser launch for {card_name}")
+                
                 time.sleep(delay)
-                logger.info(f"Delayed {delay:.2f}s before browser launch for {card_name}")
                 
                 # Run the async function in this thread's event loop
                 result = loop.run_until_complete(
@@ -1141,13 +1152,17 @@ class PriceScrapingService:
                     # Get final URL
                     final_url = page.url
                     
-                    return {
+                    result = {
                         "tcgplayer_price": price_data.get('tcg_price'),
                         "tcgplayer_market_price": price_data.get('tcg_market_price'),
                         "tcgplayer_url": final_url,
                         "tcgplayer_product_id": None,
                         "tcgplayer_variant_selected": None
                     }
+                    
+                    logger.info(f"Returning from pooled scraping: tcg=${result['tcgplayer_price']}, market=${result['tcgplayer_market_price']}")
+                    
+                    return result
                     
                 finally:
                     # Always close context to prevent resource leaks
@@ -1319,7 +1334,11 @@ class PriceScrapingService:
                 else:
                     logger.warning(f"Price scraping failed for {card_number}: {price_data.get('error', 'Unknown error')}")
                 
-                return {
+                # Debug logging before return
+                logger.info(f"About to return from scrape_card_price for {card_number}:")
+                logger.info(f"price_data contains: tcgplayer_price={price_data.get('tcgplayer_price')}, tcgplayer_market_price={price_data.get('tcgplayer_market_price')}")
+                
+                final_result = {
                     "success": not bool(price_data.get('error')),
                     "card_number": card_number,
                     "card_name": card_name,
@@ -1329,6 +1348,10 @@ class PriceScrapingService:
                     "last_updated": get_current_utc_datetime(),
                     **price_data
                 }
+                
+                logger.info(f"Final result contains: tcgplayer_price={final_result.get('tcgplayer_price')}, tcgplayer_market_price={final_result.get('tcgplayer_market_price')}")
+                
+                return final_result
                 
             except Exception as e:
                 logger.error(f"❌ Error in thread pool execution for {card_number}: {e}", exc_info=True)
