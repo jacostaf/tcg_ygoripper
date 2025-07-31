@@ -53,7 +53,9 @@ PRICE_CACHE_COLLECTION = "YGO_CARD_VARIANT_PRICE_CACHE_V1"
 
 
 # Rate Limiting Configuration
-API_RATE_LIMIT_DELAY = 0.1  # 100ms delay between requests (20 req/sec max)
+# YGOProdeck API limit: 20 requests per second max
+# Using 0.15s delay (6.67 req/sec) to be safely under the limit
+API_RATE_LIMIT_DELAY = 0.15  # 150ms delay between requests (6.67 req/sec max, well under YGO's 20 req/sec limit)
 BATCH_SIZE = 100  # Default batch size for bulk operations
 
 # Memory Management Configuration
