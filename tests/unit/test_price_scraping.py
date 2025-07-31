@@ -180,11 +180,13 @@ class TestPriceScrapingService:
     def test_scrape_card_price_request_failure(self, service):
         """Test card price scraping with request failure."""
         with patch.object(service, 'validate_card_rarity', return_value=True), \
-             patch.object(service, 'find_cached_price_data', return_value=None), \
-             patch('ygoapi.price_scraping.asyncio.run') as mock_run:
+             patch.object(service, '_find_cached_price_data_with_staleness_info', return_value=None), \
+             patch.object(service._scraping_executor, 'submit') as mock_submit:
 
-            # Mock asyncio.run to raise an exception
-            mock_run.side_effect = Exception("Network error")
+            # Mock thread pool executor to raise an exception
+            mock_future = MagicMock()
+            mock_future.result.side_effect = Exception("Network error")
+            mock_submit.return_value = mock_future
 
             result = service.scrape_card_price("LOB-001", "Blue-Eyes White Dragon", "Ultra Rare")
 
@@ -299,10 +301,12 @@ class TestPriceScrapingErrorHandling:
             service = PriceScrapingService()
         
         with patch.object(service, 'validate_card_rarity', return_value=True), \
-             patch.object(service, 'find_cached_price_data', return_value=None), \
-             patch('ygoapi.price_scraping.asyncio.run') as mock_run:
+             patch.object(service, '_find_cached_price_data_with_staleness_info', return_value=None), \
+             patch.object(service._scraping_executor, 'submit') as mock_submit:
             
-            mock_run.side_effect = Exception("timeout")
+            mock_future = MagicMock()
+            mock_future.result.side_effect = Exception("timeout")
+            mock_submit.return_value = mock_future
             
             result = service.scrape_card_price("LOB-001", "Blue-Eyes White Dragon", "Ultra Rare")
             
@@ -315,10 +319,12 @@ class TestPriceScrapingErrorHandling:
             service = PriceScrapingService()
         
         with patch.object(service, 'validate_card_rarity', return_value=True), \
-             patch.object(service, 'find_cached_price_data', return_value=None), \
-             patch('ygoapi.price_scraping.asyncio.run') as mock_run:
+             patch.object(service, '_find_cached_price_data_with_staleness_info', return_value=None), \
+             patch.object(service._scraping_executor, 'submit') as mock_submit:
             
-            mock_run.return_value = {"error": "No price data found"}
+            mock_future = MagicMock()
+            mock_future.result.return_value = {"error": "No price data found"}
+            mock_submit.return_value = mock_future
             
             result = service.scrape_card_price("LOB-001", "Blue-Eyes White Dragon", "Ultra Rare")
             
@@ -330,10 +336,12 @@ class TestPriceScrapingErrorHandling:
             service = PriceScrapingService()
         
         with patch.object(service, 'validate_card_rarity', return_value=True), \
-             patch.object(service, 'find_cached_price_data', return_value=None), \
-             patch('ygoapi.price_scraping.asyncio.run') as mock_run:
+             patch.object(service, '_find_cached_price_data_with_staleness_info', return_value=None), \
+             patch.object(service._scraping_executor, 'submit') as mock_submit:
             
-            mock_run.side_effect = Exception("HTTP 404 error")
+            mock_future = MagicMock()
+            mock_future.result.side_effect = Exception("HTTP 404 error")
+            mock_submit.return_value = mock_future
             
             result = service.scrape_card_price("LOB-001", "Blue-Eyes White Dragon", "Ultra Rare")
             
