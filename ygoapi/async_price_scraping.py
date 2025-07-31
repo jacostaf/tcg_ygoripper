@@ -259,7 +259,7 @@ class AsyncPriceScrapingService:
                     return await self._scrape_with_context(context, card_name, card_rarity, art_variant, card_number)
             else:
                 # Use browser manager for memory efficiency
-                async with self.browser_manager.acquire_browser() as browser:
+                async with self.browser_manager.create_browser() as browser:
                     context = await browser.new_context()
                     try:
                         return await self._scrape_with_context(context, card_name, card_rarity, art_variant, card_number)
