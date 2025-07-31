@@ -64,8 +64,8 @@ def register_async_routes(app):
             if browser_strategy == 'optimized':
                 pool = get_optimized_browser_pool()
                 stats = await pool.get_stats()
-                # Check if all browsers are in use
-                if stats['available'] == 0 and stats['pool_size'] >= pool.max_browsers:
+                # Check if all browsers are in use AND we're at max capacity
+                if stats.get('initialized', False) and stats['available'] == 0 and stats['pool_size'] >= pool.max_browsers:
                     capacity_available = False
                     # Estimate retry time based on average wait time
                     if stats.get('avg_wait_time', 0) > 0:

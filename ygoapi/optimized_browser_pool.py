@@ -105,8 +105,11 @@ class OptimizedBrowserPool:
             
     def _calculate_optimal_pool_size(self, available_memory_mb: int) -> int:
         """Calculate optimal pool size based on available memory."""
-        # Estimate ~100MB per browser
-        browser_memory_mb = 100
+        # Estimate ~150MB per browser (more realistic with all processes)
+        browser_memory_mb = 150
+        
+        # Ensure we have positive available memory
+        available_memory_mb = max(available_memory_mb, 50)
         
         # Calculate how many browsers we can fit
         max_possible = available_memory_mb // browser_memory_mb
@@ -118,46 +121,58 @@ class OptimizedBrowserPool:
         if available_memory_mb < 200:
             optimal = 1
             
+        logger.info(f"Calculated optimal pool size: {optimal} (available: {available_memory_mb}MB, per-browser: {browser_memory_mb}MB)")
         return optimal
         
     async def _launch_browser(self) -> Browser:
         """Launch a browser with optimized settings."""
-        return await self._playwright.chromium.launch(
+        args = [
+            '--disable-blink-features=AutomationControlled',
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',  # Important for Docker
+            '--disable-gpu',
+            '--no-zygote',
+            # Removed --single-process as it can cause instability
+            '--disable-web-security',
+            '--disable-features=IsolateOrigins,site-per-process',
+            '--disable-site-isolation-trials',
+            # Memory optimization flags
+            '--memory-pressure-off',
+            '--js-flags=--max-old-space-size=64',  # Further limit JS heap to 64MB
+            '--disable-background-timer-throttling',
+            '--disable-backgrounding-occluded-windows',
+            '--disable-renderer-backgrounding',
+            # Additional memory optimizations
+            '--disable-extensions',
+            '--disable-plugins',
+            '--disable-default-apps',
+            '--disable-sync',
+            '--disable-translate',
+            '--no-first-run',
+            '--disable-background-networking',
+            '--disable-component-extensions-with-background-pages',
+            '--disable-client-side-phishing-detection',
+            '--disable-component-update',
+            '--disable-domain-reliability',
+            # Limit disk cache
+            '--disk-cache-size=1',
+            '--media-cache-size=1'
+        ]
+        
+        logger.info(f"Launching browser with args: {' '.join(args[:5])}...")
+        
+        browser = await self._playwright.chromium.launch(
             headless=True,
-            args=[
-                '--disable-blink-features=AutomationControlled',
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',  # Important for Docker
-                '--disable-gpu',
-                '--no-zygote',
-                '--single-process',  # Reduces memory usage
-                '--disable-web-security',
-                '--disable-features=IsolateOrigins,site-per-process',
-                '--disable-site-isolation-trials',
-                # Memory optimization flags
-                '--memory-pressure-off',
-                '--js-flags=--max-old-space-size=64',  # Further limit JS heap to 64MB
-                '--disable-background-timer-throttling',
-                '--disable-backgrounding-occluded-windows',
-                '--disable-renderer-backgrounding',
-                # Additional memory optimizations
-                '--disable-extensions',
-                '--disable-plugins',
-                '--disable-default-apps',
-                '--disable-sync',
-                '--disable-translate',
-                '--no-first-run',
-                '--disable-background-networking',
-                '--disable-component-extensions-with-background-pages',
-                '--disable-client-side-phishing-detection',
-                '--disable-component-update',
-                '--disable-domain-reliability',
-                # Limit disk cache
-                '--disk-cache-size=1',
-                '--media-cache-size=1'
-            ]
+            args=args
         )
+        
+        # Verify browser is connected
+        if not browser.is_connected():
+            raise Exception("Browser failed to launch properly")
+            
+        logger.info("Browser launched successfully")
+        return browser
         
     @asynccontextmanager
     async def acquire_context(self, timeout: float = 600.0):
