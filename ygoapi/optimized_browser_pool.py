@@ -204,6 +204,7 @@ class OptimizedBrowserPool:
                 browser = await self._launch_browser()
                 self._browsers.append(browser)
             
+            
             # Create isolated context
             context = await browser.new_context(
                 viewport={'width': 1920, 'height': 1080},

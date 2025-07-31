@@ -15,7 +15,7 @@ TEST_CARDS = [
     {"card_number": "BLMM-EN137", "card_name": "Gem-Knight Aquamarine", "card_rarity": "Ultra Rare"}
 ]
 
-BASE_URL = "http://localhost:8081"
+BASE_URL = "http://localhost:8082"
 
 async def test_single_card(session, card_data):
     """Test scraping a single card."""
