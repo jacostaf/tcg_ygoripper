@@ -66,21 +66,26 @@ class OptimizedBrowserPool:
     def _get_available_memory_mb(self) -> int:
         """Get available system memory in MB."""
         try:
-            # Check if we're on Render with memory limit
-            if os.getenv('RENDER'):
-                # Get total memory usage including browser processes
-                total_usage = self._get_total_memory_usage_mb()
-                memory_limit = int(os.getenv('MEMORY_LIMIT_MB', '512'))
-                available = memory_limit - total_usage
-                logger.debug(f"Render memory: {total_usage}MB used, {available}MB available of {memory_limit}MB")
-                return max(0, available)
+            # Check for memory limit (MEM_LIMIT is set to 512 on Render)
+            memory_limit = int(os.getenv('MEM_LIMIT', '0'))
             
-            # For other environments, use actual available memory
+            if memory_limit > 0:
+                # We have a memory limit (container environment like Render)
+                # Get current usage and calculate available
+                current_usage = self._get_total_memory_usage_mb()
+                available = memory_limit - current_usage
+                logger.debug(f"Container memory: {current_usage}MB used, {available}MB available of {memory_limit}MB limit")
+                return max(50, available)  # Minimum 50MB
+            
+            # For environments without memory limits, use system available memory
             vm = psutil.virtual_memory()
-            return int(vm.available / 1024 / 1024)
-        except:
+            available = int(vm.available / 1024 / 1024)
+            logger.debug(f"System memory: {available}MB available")
+            return available
+        except Exception as e:
+            logger.error(f"Error calculating available memory: {e}")
             # Fallback to conservative estimate
-            return 200
+            return 150
     
     def _get_total_memory_usage_mb(self) -> int:
         """Get total memory usage including browser subprocesses."""
@@ -105,23 +110,25 @@ class OptimizedBrowserPool:
             
     def _calculate_optimal_pool_size(self, available_memory_mb: int) -> int:
         """Calculate optimal pool size based on available memory."""
-        # Estimate ~150MB per browser (more realistic with all processes)
+        # Check memory limit from environment (MEM_LIMIT is set to 512 on Render)
+        memory_limit = int(os.getenv('MEM_LIMIT', '0'))
+        
+        if memory_limit > 0 and memory_limit <= 512:
+            # Force single browser for 512MB or smaller environments
+            logger.info(f"Memory-constrained environment detected (MEM_LIMIT={memory_limit}MB) - forcing pool size to 1")
+            return 1
+        
+        # For larger environments, calculate based on available memory
         browser_memory_mb = 150
-        
-        # Ensure we have positive available memory
         available_memory_mb = max(available_memory_mb, 50)
-        
-        # Calculate how many browsers we can fit
         max_possible = available_memory_mb // browser_memory_mb
-        
-        # Apply min/max constraints
         optimal = max(self.min_browsers, min(max_possible, self.max_browsers))
         
-        # On very constrained environments, be conservative
-        if available_memory_mb < 200:
+        # Conservative fallback for environments with unclear memory limits
+        if available_memory_mb < 400:
             optimal = 1
             
-        logger.info(f"Calculated optimal pool size: {optimal} (available: {available_memory_mb}MB, per-browser: {browser_memory_mb}MB)")
+        logger.info(f"Calculated optimal pool size: {optimal} (available: {available_memory_mb}MB, per-browser: {browser_memory_mb}MB, MEM_LIMIT: {memory_limit}MB)")
         return optimal
         
     async def _launch_browser(self) -> Browser:

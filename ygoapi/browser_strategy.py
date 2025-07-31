@@ -27,15 +27,15 @@ def get_browser_strategy() -> str:
         logger.info(f"Using explicitly set browser strategy: {strategy}")
         return strategy
     
-    # Check if we're on Render
+    # Check if we're on Render or have memory constraints
     if os.getenv('RENDER'):
-        logger.info("Detected Render environment - using Optimized Browser Pool for memory-aware scaling")
+        logger.info("Detected Render environment - using Optimized Browser Pool with memory awareness")
         return 'optimized'
     
-    # Check memory limit if available
-    memory_limit_mb = int(os.getenv('MEMORY_LIMIT_MB', '0'))
-    if memory_limit_mb > 0 and memory_limit_mb < 1024:
-        logger.info(f"Memory limit {memory_limit_mb}MB < 1024MB - using Optimized Browser Pool")
+    # Check memory limit (MEM_LIMIT is set to 512 on Render)
+    memory_limit_mb = int(os.getenv('MEM_LIMIT', '0'))
+    if memory_limit_mb > 0 and memory_limit_mb <= 512:
+        logger.info(f"Memory limit {memory_limit_mb}MB <= 512MB - using Optimized Browser Pool")
         return 'optimized'
     
     # Default to pool for better performance
