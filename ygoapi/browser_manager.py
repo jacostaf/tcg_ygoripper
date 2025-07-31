@@ -37,7 +37,7 @@ class BrowserManager:
             # Start playwright
             playwright = await async_playwright().start()
             
-            # Launch browser with stealth settings
+            # Launch browser with memory-optimized settings
             launch_args = [
                 '--disable-blink-features=AutomationControlled',
                 '--disable-features=IsolateOrigins,site-per-process',
@@ -48,6 +48,17 @@ class BrowserManager:
                 '--disable-dev-shm-usage',
                 '--disable-gpu',
                 '--window-size=1280,720',
+                # Memory optimizations from OptimizedBrowserPool
+                '--js-flags=--max-old-space-size=64',
+                '--disable-extensions',
+                '--disable-plugins',
+                '--disable-default-apps',
+                '--disable-sync',
+                '--disable-translate',
+                '--no-first-run',
+                '--disable-background-networking',
+                '--disk-cache-size=1',
+                '--media-cache-size=1'
             ]
             
             if self.headless:

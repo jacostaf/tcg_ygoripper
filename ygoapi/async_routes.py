@@ -356,7 +356,7 @@ def register_async_routes(app):
     async def get_cards_from_set(set_name):
         """Get all cards from a specific set."""
         try:
-            cards = card_set_service.get_cards_from_set(set_name)
+            cards = card_variant_service.fetch_cards_from_set(set_name)
             
             return jsonify({
                 "success": True,
