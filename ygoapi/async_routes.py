@@ -4,10 +4,14 @@ Async Routes Module
 This module defines all the async API routes using Quart.
 """
 
+import asyncio
 import logging
 import os
+import requests
+import time
 from datetime import datetime, timezone
-from quart import Blueprint, jsonify, request, current_app
+from quart import Blueprint, jsonify, request, current_app, Response
+from urllib.parse import unquote
 
 from .async_browser_pool import get_browser_pool
 from .optimized_browser_pool import get_optimized_browser_pool
@@ -484,6 +488,85 @@ def register_async_routes(app):
             return jsonify({
                 "success": False,
                 "error": "Internal server error during card fetching"
+            }), 500
+
+    @app.route('/cards/image', methods=['GET'])
+    async def proxy_card_image():
+        """
+        Proxy images from YGO API with rate limiting and compliance warnings.
+        
+        WARNING: This endpoint proxies images from YGOProdeck. According to their guidelines:
+        "Do not continually hotlink images directly from this site. Please download and re-host the images yourself."
+        
+        For production use, consider implementing proper image caching/hosting.
+        
+        Query parameters:
+        - url: The image URL to proxy (must be from images.ygoprodeck.com)
+        """
+        try:
+            image_url = request.args.get('url')
+            if not image_url:
+                return jsonify({
+                    "success": False,
+                    "error": "Missing 'url' parameter"
+                }), 400
+            
+            # Decode URL if it's encoded
+            image_url = unquote(image_url)
+            
+            # Security check: only allow YGO API images
+            if not image_url.startswith(('https://images.ygoprodeck.com/', 'http://images.ygoprodeck.com/')):
+                return jsonify({
+                    "success": False,
+                    "error": "Only YGO API images are allowed"
+                }), 403
+            
+            # Log usage for monitoring compliance
+            logger.warning(f"Image proxy used for: {image_url}. Consider implementing proper image hosting for production.")
+            
+            # Rate limiting: respect YGOProdeck's guidelines
+            await asyncio.sleep(API_RATE_LIMIT_DELAY)
+            
+            # Fetch the image from YGO API
+            response = requests.get(image_url, timeout=10, stream=True)
+            
+            if response.status_code == 200:
+                # Determine content type
+                content_type = response.headers.get('content-type', 'image/jpeg')
+                
+                # Stream the response
+                def generate():
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            yield chunk
+                
+                return Response(
+                    generate(),
+                    content_type=content_type,
+                    headers={
+                        'Cache-Control': 'public, max-age=86400',  # Cache for 24 hours
+                        'Access-Control-Allow-Origin': '*',
+                        'Access-Control-Allow-Methods': 'GET',
+                        'Access-Control-Allow-Headers': 'Content-Type',
+                        'X-Proxy-Warning': 'Consider downloading and hosting images locally per YGOProdeck guidelines'
+                    }
+                )
+            else:
+                return jsonify({
+                    "success": False,
+                    "error": f"Failed to fetch image: HTTP {response.status_code}"
+                }), response.status_code
+                
+        except requests.exceptions.Timeout:
+            return jsonify({
+                "success": False,
+                "error": "Timeout fetching image"
+            }), 504
+        except Exception as e:
+            logger.error(f"Error proxying image: {e}")
+            return jsonify({
+                "success": False,
+                "error": "Internal server error"
             }), 500
 
     @app.route('/debug/art-extraction', methods=['POST'])
