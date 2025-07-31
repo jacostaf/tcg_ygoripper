@@ -113,15 +113,30 @@ class OptimizedBrowserPool:
                 '--disable-site-isolation-trials',
                 # Memory optimization flags
                 '--memory-pressure-off',
-                '--js-flags=--max-old-space-size=128',  # Limit JS heap
+                '--js-flags=--max-old-space-size=64',  # Further limit JS heap to 64MB
                 '--disable-background-timer-throttling',
                 '--disable-backgrounding-occluded-windows',
-                '--disable-renderer-backgrounding'
+                '--disable-renderer-backgrounding',
+                # Additional memory optimizations
+                '--disable-extensions',
+                '--disable-plugins',
+                '--disable-default-apps',
+                '--disable-sync',
+                '--disable-translate',
+                '--no-first-run',
+                '--disable-background-networking',
+                '--disable-component-extensions-with-background-pages',
+                '--disable-client-side-phishing-detection',
+                '--disable-component-update',
+                '--disable-domain-reliability',
+                # Limit disk cache
+                '--disk-cache-size=1',
+                '--media-cache-size=1'
             ]
         )
         
     @asynccontextmanager
-    async def acquire_context(self, timeout: float = 30.0):
+    async def acquire_context(self, timeout: float = 600.0):
         """Acquire a browser context with timeout."""
         if not self._initialized:
             await self.initialize()

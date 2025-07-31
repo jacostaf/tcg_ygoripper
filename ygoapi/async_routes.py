@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from quart import Blueprint, jsonify, request, current_app
 
 from .async_browser_pool import get_browser_pool
+from .optimized_browser_pool import get_optimized_browser_pool
 from .browser_strategy import get_browser_strategy
 from .async_price_scraping import get_async_price_service
 from .card_services import card_set_service, card_variant_service, card_lookup_service
@@ -34,6 +35,9 @@ def register_async_routes(app):
         if browser_strategy == 'pool':
             browser_pool = get_browser_pool()
             browser_stats = await browser_pool.get_stats()
+        elif browser_strategy == 'optimized':
+            optimized_pool = get_optimized_browser_pool()
+            browser_stats = await optimized_pool.get_stats()
         else:
             browser_stats = {
                 "strategy": "manager",
@@ -52,6 +56,37 @@ def register_async_routes(app):
     async def scrape_card_price():
         """Scrape price data for a specific card from TCGPlayer."""
         try:
+            # Check browser pool capacity first
+            browser_strategy = get_browser_strategy()
+            capacity_available = True
+            retry_after = 60  # Default retry after 60 seconds
+            
+            if browser_strategy == 'optimized':
+                pool = get_optimized_browser_pool()
+                stats = await pool.get_stats()
+                # Check if all browsers are in use
+                if stats['available'] == 0 and stats['pool_size'] >= pool.max_browsers:
+                    capacity_available = False
+                    # Estimate retry time based on average wait time
+                    if stats.get('avg_wait_time', 0) > 0:
+                        retry_after = int(stats['avg_wait_time'] + 10)
+            elif browser_strategy == 'pool':
+                pool = get_browser_pool()
+                stats = await pool.get_stats()
+                if stats['available_browsers'] == 0:
+                    capacity_available = False
+            
+            if not capacity_available:
+                logger.warning("Browser pool at capacity, returning 503")
+                return jsonify({
+                    "success": False,
+                    "error": "Service temporarily unavailable due to high load. Please retry later.",
+                    "message": "Browser pool at capacity"
+                }), 503, {
+                    'Retry-After': str(retry_after),
+                    'X-Pool-Status': 'at-capacity'
+                }
+            
             data = await request.get_json()
             
             if not data:
@@ -211,6 +246,9 @@ def register_async_routes(app):
             if browser_strategy == 'pool':
                 browser_pool = get_browser_pool()
                 stats = await browser_pool.get_stats()
+            elif browser_strategy == 'optimized':
+                optimized_pool = get_optimized_browser_pool()
+                stats = await optimized_pool.get_stats()
             else:
                 stats = {
                     "strategy": "manager",
