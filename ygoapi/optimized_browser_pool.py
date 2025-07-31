@@ -68,9 +68,12 @@ class OptimizedBrowserPool:
         try:
             # Check if we're on Render with memory limit
             if os.getenv('RENDER'):
-                # Render typically has 512MB total
-                # Reserve 250MB for OS/Python/etc
-                return 512 - 250
+                # Get total memory usage including browser processes
+                total_usage = self._get_total_memory_usage_mb()
+                memory_limit = int(os.getenv('MEMORY_LIMIT_MB', '512'))
+                available = memory_limit - total_usage
+                logger.debug(f"Render memory: {total_usage}MB used, {available}MB available of {memory_limit}MB")
+                return max(0, available)
             
             # For other environments, use actual available memory
             vm = psutil.virtual_memory()
@@ -78,6 +81,27 @@ class OptimizedBrowserPool:
         except:
             # Fallback to conservative estimate
             return 200
+    
+    def _get_total_memory_usage_mb(self) -> int:
+        """Get total memory usage including browser subprocesses."""
+        try:
+            total_mb = 0
+            # Get current process memory
+            current_process = psutil.Process()
+            total_mb += current_process.memory_info().rss / 1024 / 1024
+            
+            # Get all child processes (browsers)
+            for child in current_process.children(recursive=True):
+                try:
+                    total_mb += child.memory_info().rss / 1024 / 1024
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            
+            return int(total_mb)
+        except Exception as e:
+            logger.error(f"Error calculating total memory: {e}")
+            # Return conservative estimate
+            return 300
             
     def _calculate_optimal_pool_size(self, available_memory_mb: int) -> int:
         """Calculate optimal pool size based on available memory."""
@@ -142,6 +166,8 @@ class OptimizedBrowserPool:
             await self.initialize()
             
         start_time = asyncio.get_event_loop().time()
+        browser = None
+        context = None
         
         try:
             # Wait for available browser
@@ -153,20 +179,49 @@ class OptimizedBrowserPool:
             wait_time = asyncio.get_event_loop().time() - start_time
             self._queue_wait_times.append(wait_time)
             
+            # Check if browser is still connected
+            if not browser.is_connected():
+                logger.error("Browser disconnected, creating new one")
+                # Remove dead browser from pool
+                if browser in self._browsers:
+                    self._browsers.remove(browser)
+                # Launch replacement browser
+                browser = await self._launch_browser()
+                self._browsers.append(browser)
+            
             # Create isolated context
             context = await browser.new_context(
                 viewport={'width': 1920, 'height': 1080},
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             )
             
-            try:
-                yield context
-            finally:
-                await context.close()
-                
+            yield context
+            
+        except Exception as e:
+            logger.error(f"Error in acquire_context: {e}")
+            raise
         finally:
-            # Return browser to pool
-            await self._browser_queue.put(browser)
+            # Clean up context
+            if context:
+                try:
+                    await context.close()
+                except Exception as e:
+                    logger.error(f"Error closing context: {e}")
+            
+            # Return browser to pool only if valid
+            if browser and browser.is_connected():
+                await self._browser_queue.put(browser)
+            else:
+                logger.warning("Browser disconnected, not returning to pool")
+                # Launch replacement if needed
+                if len(self._browsers) < self.min_browsers:
+                    try:
+                        new_browser = await self._launch_browser()
+                        self._browsers.append(new_browser)
+                        await self._browser_queue.put(new_browser)
+                    except Exception as e:
+                        logger.error(f"Failed to launch replacement browser: {e}")
+            
             self._request_count += 1
             
             # Consider scaling if needed
@@ -197,7 +252,9 @@ class OptimizedBrowserPool:
             "available": self._browser_queue.qsize() if self._browser_queue else 0,
             "total_requests": self._request_count,
             "avg_wait_time": sum(self._queue_wait_times[-10:]) / min(10, len(self._queue_wait_times)) if self._queue_wait_times else 0,
-            "available_memory_mb": self._get_available_memory_mb()
+            "available_memory_mb": self._get_available_memory_mb(),
+            "total_memory_usage_mb": self._get_total_memory_usage_mb(),
+            "memory_limit_mb": int(os.getenv('MEMORY_LIMIT_MB', '512')) if os.getenv('RENDER') else None
         }
         
     async def shutdown(self):
