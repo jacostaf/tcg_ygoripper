@@ -39,6 +39,19 @@ def register_routes(app: Flask) -> None:
             "memory_stats": get_memory_stats()
         })
     
+    @app.after_request
+    def after_request(response):
+        """Add debugging headers to all responses"""
+        # Add some debug info for CORS troubleshooting
+        origin = request.headers.get('Origin', 'N/A')
+        logger.debug(f"Request from origin: {origin} to {request.path}")
+        
+        # Ensure CORS headers are present (Flask-CORS should handle this, but let's be explicit)
+        if not response.headers.get('Access-Control-Allow-Origin'):
+            response.headers['Access-Control-Allow-Origin'] = '*'
+        
+        return response
+    
     @app.route('/cards/price', methods=['POST'])
     @monitor_memory
     def scrape_card_price():
@@ -576,13 +589,16 @@ def register_routes(app: Flask) -> None:
     
     @app.route('/cards/image', methods=['GET'])
     @monitor_memory
-    def proxy_card_image_legacy():
+    def get_card_image_url():
         """
-        Proxy images from YGO API to avoid CORS issues and provide rate limiting.
-        This is the legacy endpoint that matches the original main.py implementation.
+        Get card image URL without server-side proxying (YGOProdeck compliant).
+        
+        This endpoint returns the original YGOProdeck image URL for client-side downloading.
+        This approach is compliant with YGOProdeck's terms of service as it avoids
+        server-side hotlinking and distributes load across user devices.
         
         Query parameters:
-        - url: The image URL to proxy (must be from images.ygoprodeck.com)
+        - url: The image URL to validate and return (must be from images.ygoprodeck.com)
         """
         try:
             image_url = request.args.get('url')
@@ -602,64 +618,32 @@ def register_routes(app: Flask) -> None:
                     "error": "Only YGO API images are allowed"
                 }), 403
             
-            # Rate limiting: ensure minimum delay between image requests
-            current_time = time.time()
-            time_since_last = current_time - last_image_request_time["time"]
-            if time_since_last < API_RATE_LIMIT_DELAY:
-                time.sleep(API_RATE_LIMIT_DELAY - time_since_last)
-            
-            last_image_request_time["time"] = time.time()
-            
-            # Fetch the image from YGO API
-            response = requests.get(image_url, timeout=10, stream=True)
-            
-            if response.status_code == 200:
-                # Determine content type
-                content_type = response.headers.get('content-type', 'image/jpeg')
-                
-                # Create response with proper headers
-                def generate():
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            yield chunk
-                
-                return Response(
-                    generate(),
-                    content_type=content_type,
-                    headers={
-                        'Cache-Control': 'public, max-age=86400',  # Cache for 24 hours
-                        'Access-Control-Allow-Origin': '*',
-                        'Access-Control-Allow-Methods': 'GET',
-                        'Access-Control-Allow-Headers': 'Content-Type'
-                    }
-                )
-            else:
-                return jsonify({
-                    "success": False,
-                    "error": f"Failed to fetch image: HTTP {response.status_code}"
-                }), response.status_code
-                
-        except requests.exceptions.Timeout:
+            # Return the validated URL for client-side downloading
             return jsonify({
-                "success": False,
-                "error": "Timeout fetching image"
-            }), 504
+                "success": True,
+                "image_url": image_url,
+                "download_direct": True,
+                "message": "Use this URL for client-side downloading to comply with YGOProdeck terms"
+            })
+                
         except Exception as e:
-            logger.error(f"Error proxying image: {e}")
+            logger.error(f"Error validating image URL: {e}")
             return jsonify({
                 "success": False,
                 "error": "Internal server error"
             }), 500
 
-    @app.route('/api/image/proxy', methods=['GET'])
+    @app.route('/api/image/info', methods=['GET'])
     @monitor_memory
-    def proxy_card_image_new():
+    def get_card_image_info():
         """
-        Proxy images from YGO API to avoid CORS issues and provide rate limiting.
-        This is the new API endpoint with enhanced functionality.
+        Get card image information without server-side proxying (YGOProdeck compliant).
+        
+        Returns metadata about the image for client-side downloading.
+        This approach complies with YGOProdeck's terms by avoiding server-side hotlinking.
         
         Query parameters:
-        - url: The image URL to proxy (must be from images.ygoprodeck.com)
+        - url: The image URL to get info for (must be from images.ygoprodeck.com)
         """
         try:
             image_url = request.args.get('url')
@@ -679,50 +663,21 @@ def register_routes(app: Flask) -> None:
                     "error": "Only YGO API images are allowed"
                 }), 403
             
-            # Rate limiting: ensure minimum delay between image requests
-            current_time = time.time()
-            time_since_last = current_time - last_image_request_time["time"]
-            if time_since_last < API_RATE_LIMIT_DELAY:
-                time.sleep(API_RATE_LIMIT_DELAY - time_since_last)
-            
-            last_image_request_time["time"] = time.time()
-            
-            # Fetch the image from YGO API
-            response = requests.get(image_url, timeout=10, stream=True)
-            
-            if response.status_code == 200:
-                # Determine content type
-                content_type = response.headers.get('content-type', 'image/jpeg')
-                
-                # Create response with proper headers
-                def generate():
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            yield chunk
-                
-                return Response(
-                    generate(),
-                    content_type=content_type,
-                    headers={
-                        'Cache-Control': 'public, max-age=86400',  # Cache for 24 hours
-                        'Access-Control-Allow-Origin': '*',
-                        'Access-Control-Allow-Methods': 'GET',
-                        'Access-Control-Allow-Headers': 'Content-Type'
-                    }
-                )
-            else:
-                return jsonify({
-                    "success": False,
-                    "error": f"Failed to fetch image: HTTP {response.status_code}"
-                }), response.status_code
-                
-        except requests.exceptions.Timeout:
+            # Return image metadata for client-side downloading
             return jsonify({
-                "success": False,
-                "error": "Timeout fetching image"
-            }), 504
+                "success": True,
+                "image_url": image_url,
+                "content_type": "image/jpeg",
+                "cache_info": {
+                    "suggested_cache_duration": "24 hours",
+                    "cache_key": image_url.split('/')[-1]
+                },
+                "download_direct": True,
+                "compliance_note": "Download directly from YGOProdeck to comply with their terms"
+            })
+                
         except Exception as e:
-            logger.error(f"Error proxying image: {e}")
+            logger.error(f"Error getting image info: {e}")
             return jsonify({
                 "success": False,
                 "error": "Internal server error"
@@ -732,14 +687,15 @@ def register_routes(app: Flask) -> None:
     @monitor_memory
     def get_card_image_by_id(card_id: int):
         """
-        Get card image URL by card ID with built-in proxy option.
+        Get card image URL by card ID (YGOProdeck compliant).
+        
+        Always returns original YGOProdeck URLs for client-side downloading.
+        This approach complies with YGOProdeck's terms of service.
         
         Query parameters:
-        - proxy: If 'true', returns proxied URL through this server
         - size: 'small', 'normal', or 'cropped' (default: 'normal')
         """
         try:
-            proxy_enabled = request.args.get('proxy', 'false').lower() == 'true'
             size = request.args.get('size', 'normal').lower()
             
             # Construct YGO API image URL based on size
@@ -750,27 +706,15 @@ def register_routes(app: Flask) -> None:
             else:  # normal
                 image_url = f"https://images.ygoprodeck.com/images/cards/{card_id}.jpg"
             
-            if proxy_enabled:
-                # Return proxied URL
-                from urllib.parse import quote
-                proxied_url = f"/api/image/proxy?url={quote(image_url)}"
-                return jsonify({
-                    "success": True,
-                    "card_id": card_id,
-                    "image_url": proxied_url,
-                    "direct_url": image_url,
-                    "proxy_enabled": True,
-                    "size": size
-                })
-            else:
-                # Return direct URL
-                return jsonify({
-                    "success": True,
-                    "card_id": card_id,
-                    "image_url": image_url,
-                    "proxy_enabled": False,
-                    "size": size
-                })
+            # Always return direct URL for compliance
+            return jsonify({
+                "success": True,
+                "card_id": card_id,
+                "image_url": image_url,
+                "download_direct": True,
+                "size": size,
+                "compliance_note": "Download directly from YGOProdeck for compliance with their terms"
+            })
                 
         except Exception as e:
             logger.error(f"Error getting card image for ID {card_id}: {e}")

@@ -42,17 +42,19 @@ def create_async_app() -> Quart:
     # Create Quart app
     app = Quart(__name__)
 
-    # Enable CORS for all routes
+    # Enable CORS for all routes (including local development)
     app = cors(
         app,
         allow_origin=[
             "http://localhost:*",
             "http://127.0.0.1:*",
+            "http://0.0.0.0:*",
+            "file://*",  # Allow file:// protocol for local HTML files
             "https://ygopwa.onrender.com",
             "https://*.onrender.com",
         ],
         allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-        allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
+        allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept"],
         allow_credentials=True,
         expose_headers=["Content-Length", "X-Foo", "X-Bar"],
         max_age=600,  # Cache preflight request for 10 minutes

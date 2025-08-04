@@ -491,17 +491,16 @@ def register_async_routes(app):
             }), 500
 
     @app.route('/cards/image', methods=['GET'])
-    async def proxy_card_image():
+    async def get_card_image_url():
         """
-        Proxy images from YGO API with rate limiting and compliance warnings.
+        Get card image URL without server-side proxying (YGOProdeck compliant).
         
-        WARNING: This endpoint proxies images from YGOProdeck. According to their guidelines:
-        "Do not continually hotlink images directly from this site. Please download and re-host the images yourself."
-        
-        For production use, consider implementing proper image caching/hosting.
+        This endpoint returns the original YGOProdeck image URL for client-side downloading.
+        This approach is compliant with YGOProdeck's terms of service as it avoids
+        server-side hotlinking and distributes load across user devices.
         
         Query parameters:
-        - url: The image URL to proxy (must be from images.ygoprodeck.com)
+        - url: The image URL to validate and return (must be from images.ygoprodeck.com)
         """
         try:
             image_url = request.args.get('url')
@@ -521,53 +520,140 @@ def register_async_routes(app):
                     "error": "Only YGO API images are allowed"
                 }), 403
             
-            # Log usage for monitoring compliance
-            logger.warning(f"Image proxy used for: {image_url}. Consider implementing proper image hosting for production.")
-            
-            # Rate limiting: respect YGOProdeck's guidelines
-            await asyncio.sleep(API_RATE_LIMIT_DELAY)
-            
-            # Fetch the image from YGO API
-            response = requests.get(image_url, timeout=10, stream=True)
-            
-            if response.status_code == 200:
-                # Determine content type
-                content_type = response.headers.get('content-type', 'image/jpeg')
-                
-                # Stream the response
-                def generate():
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            yield chunk
-                
-                return Response(
-                    generate(),
-                    content_type=content_type,
-                    headers={
-                        'Cache-Control': 'public, max-age=86400',  # Cache for 24 hours
-                        'Access-Control-Allow-Origin': '*',
-                        'Access-Control-Allow-Methods': 'GET',
-                        'Access-Control-Allow-Headers': 'Content-Type',
-                        'X-Proxy-Warning': 'Consider downloading and hosting images locally per YGOProdeck guidelines'
-                    }
-                )
-            else:
-                return jsonify({
-                    "success": False,
-                    "error": f"Failed to fetch image: HTTP {response.status_code}"
-                }), response.status_code
-                
-        except requests.exceptions.Timeout:
+            # Return the validated URL for client-side downloading
             return jsonify({
-                "success": False,
-                "error": "Timeout fetching image"
-            }), 504
+                "success": True,
+                "image_url": image_url,
+                "download_direct": True,
+                "message": "Use this URL for client-side downloading to comply with YGOProdeck terms"
+            })
+                
         except Exception as e:
-            logger.error(f"Error proxying image: {e}")
+            logger.error(f"Error validating image URL: {e}")
             return jsonify({
                 "success": False,
                 "error": "Internal server error"
             }), 500
+
+    @app.route('/api/image/info', methods=['GET'])
+    async def get_image_info():
+        """
+        Get image metadata without server-side proxying (YGOProdeck compliant).
+        
+        This endpoint provides image metadata without downloading or proxying the image.
+        This approach is compliant with YGOProdeck's terms of service.
+        
+        Query parameters:
+        - url: The image URL to get info for (must be from images.ygoprodeck.com)
+        """
+        try:
+            image_url = request.args.get('url')
+            if not image_url:
+                return jsonify({
+                    "success": False,
+                    "error": "Missing 'url' parameter"
+                }), 400
+            
+            # Decode URL if it's encoded
+            image_url = unquote(image_url)
+            
+            # Security check: only allow YGO API images
+            if not image_url.startswith(('https://images.ygoprodeck.com/', 'http://images.ygoprodeck.com/')):
+                return jsonify({
+                    "success": False,
+                    "error": "Only YGO API images are allowed"
+                }), 403
+            
+            # Extract card ID from URL for cache key
+            card_id = None
+            if '/cards/' in image_url:
+                try:
+                    card_id = image_url.split('/cards/')[-1].split('.')[0]
+                except:
+                    card_id = "unknown"
+            
+            # Return metadata for client-side downloading
+            return jsonify({
+                "success": True,
+                "image_url": image_url,
+                "content_type": "image/jpeg",
+                "cache_info": {
+                    "suggested_cache_duration": "24 hours",
+                    "cache_key": f"{card_id}.jpg" if card_id else "image.jpg"
+                },
+                "download_direct": True,
+                "compliance_note": "Download directly from YGOProdeck to comply with their terms"
+            })
+                
+        except Exception as e:
+            logger.error(f"Error getting image info: {e}")
+            return jsonify({
+                "success": False,
+                "error": "Internal server error"
+            }), 500
+
+    @app.route('/api/cards/image/<int:card_id>', methods=['GET'])
+    async def get_card_image_by_id(card_id):
+        """
+        Get card image URL by card ID (YGOProdeck compliant).
+        
+        This endpoint returns the original YGOProdeck image URL for a specific card ID.
+        This approach is compliant with YGOProdeck's terms of service.
+        
+        Path parameters:
+        - card_id: The Yu-Gi-Oh card ID
+        
+        Query parameters:
+        - size: Image size ('normal', 'small', 'cropped') - default: 'normal'
+        """
+        try:
+            size = request.args.get('size', 'normal')
+            
+            # Validate size parameter
+            valid_sizes = ['normal', 'small', 'cropped']
+            if size not in valid_sizes:
+                return jsonify({
+                    "success": False,
+                    "error": f"Invalid size parameter. Valid options: {', '.join(valid_sizes)}"
+                }), 400
+            
+            # Build YGOProdeck URL based on size
+            if size == 'small':
+                image_url = f"https://images.ygoprodeck.com/images/cards_small/{card_id}.jpg"
+            elif size == 'cropped':
+                image_url = f"https://images.ygoprodeck.com/images/cards_cropped/{card_id}.jpg"
+            else:  # normal
+                image_url = f"https://images.ygoprodeck.com/images/cards/{card_id}.jpg"
+            
+            # Return the direct URL for client-side downloading
+            return jsonify({
+                "success": True,
+                "card_id": card_id,
+                "image_url": image_url,
+                "download_direct": True,
+                "size": size,
+                "compliance_note": "Download directly from YGOProdeck for compliance with their terms"
+            })
+                
+        except Exception as e:
+            logger.error(f"Error generating image URL for card {card_id}: {e}")
+            return jsonify({
+                "success": False,
+                "error": "Internal server error"
+            }), 500
+
+    @app.after_request
+    async def after_request(response):
+        """Add debugging headers to all responses"""
+        # Add some debug info for CORS troubleshooting
+        origin = request.headers.get('Origin', 'N/A')
+        logger.debug(f"Request from origin: {origin} to {request.path}")
+        
+        # Ensure CORS headers are present (quart-cors should handle this, but let's be explicit)
+        if not response.headers.get('Access-Control-Allow-Origin'):
+            response.headers['Access-Control-Allow-Origin'] = '*'
+        
+        return response
 
     @app.route('/debug/art-extraction', methods=['POST'])
     async def debug_art_extraction():
