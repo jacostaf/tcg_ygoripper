@@ -1,5 +1,6 @@
 """
-TCGcsv Flask Application - Fixed for proper async handling
+TCGcsv Server - Main Entry Point for Yu-Gi-Oh Card API
+Thread-safe Flask server using TCGcsv.com as data source
 """
 
 import asyncio

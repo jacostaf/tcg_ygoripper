@@ -9,6 +9,7 @@ import logging
 import json
 import os
 import requests
+import threading
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, asdict
@@ -67,32 +68,38 @@ class Card:
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
-# Simple in-memory cache
+# Thread-safe in-memory cache
 class SimpleCache:
     def __init__(self):
+        self._lock = threading.RLock()  # Reentrant lock for thread safety
         self.card_sets: List[CardSet] = []
         self.cards: Dict[int, List[Card]] = {}
         self.last_updated = None
     
     def is_expired(self) -> bool:
-        if not self.last_updated:
-            return True
-        return datetime.now() - self.last_updated > timedelta(hours=CACHE_EXPIRY_HOURS)
+        with self._lock:
+            if not self.last_updated:
+                return True
+            return datetime.now() - self.last_updated > timedelta(hours=CACHE_EXPIRY_HOURS)
     
     def get_sets(self) -> List[CardSet]:
-        return self.card_sets if not self.is_expired() else []
+        with self._lock:
+            return self.card_sets if not self.is_expired() else []
     
     def update_sets(self, sets: List[CardSet]):
-        self.card_sets = sets
-        self.last_updated = datetime.now()
+        with self._lock:
+            self.card_sets = sets
+            self.last_updated = datetime.now()
     
     def get_cards(self, group_id: int) -> List[Card]:
-        if self.is_expired() or group_id not in self.cards:
-            return []
-        return self.cards[group_id]
+        with self._lock:
+            if self.is_expired() or group_id not in self.cards:
+                return []
+            return self.cards[group_id]
     
     def update_cards(self, group_id: int, cards: List[Card]):
-        self.cards[group_id] = cards
+        with self._lock:
+            self.cards[group_id] = cards
 
 # Global cache instance
 cache = SimpleCache()
