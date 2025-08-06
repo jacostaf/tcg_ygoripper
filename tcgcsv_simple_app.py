@@ -279,7 +279,7 @@ def get_set_cards(set_identifier: str):
                 'type': card.ext_card_type,
                 'race': card.ext_monster_type,
                 'image_url': card.image_url,
-                'tcg_price': card.market_price or card.mid_price or card.low_price,
+                'tcg_price': card.low_price or card.mid_price or card.market_price,
                 'market_price': card.market_price
             })
             cards_data.append(card_dict)
