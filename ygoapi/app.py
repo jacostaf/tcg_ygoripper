@@ -38,23 +38,39 @@ def create_app() -> Flask:
     app = Flask(__name__)
 
     # Enable CORS for all routes
+    # CORS(
+    #     app,
+    #     resources={
+    #         r"/*": {
+    #             "origins": [
+    #                 "http://localhost:*",
+    #                 "http://127.0.0.1:*",
+    #                 "https://ygopwa.onrender.com",
+    #                 "https://*.onrender.com",
+    #             ],
+    #             "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    #             "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
+    #             "supports_credentials": True,
+    #             "expose_headers": ["Content-Length", "X-Foo", "X-Bar"],
+    #             "max_age": 600,  # Cache preflight request for 10 minutes
+    #         }
+    #     },
+    # )
+
     CORS(
         app,
-        resources={
-            r"/*": {
-                "origins": [
-                    "http://localhost:*",
-                    "http://127.0.0.1:*",
-                    "https://ygopwa.onrender.com",
-                    "https://*.onrender.com",
-                ],
-                "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-                "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
-                "supports_credentials": True,
-                "expose_headers": ["Content-Length", "X-Foo", "X-Bar"],
-                "max_age": 600,  # Cache preflight request for 10 minutes
-            }
-        },
+        resources={r"/*": {
+            "origins": [
+                "http://localhost:3000",
+                "http://127.0.0.1:3000",
+                "https://ygopwa.onrender.com"
+            ],
+            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+            "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
+            "supports_credentials": True,
+            "expose_headers": ["Content-Length", "X-Foo", "X-Bar"],
+            "max_age": 600
+        }}
     )
 
     # Configure logging
