@@ -28,7 +28,20 @@ logger = logging.getLogger(__name__)
 
 # Create Flask app
 app = Flask(__name__)
-CORS(app, origins=get_cors_origins(), supports_credentials=True)
+# Secure CORS configuration with specific allowed origins
+allowed_origins = [
+    "http://localhost:7001",
+    "http://127.0.0.1:7001", 
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://ygopwa.onrender.com"
+]
+CORS(app, 
+     origins=allowed_origins,
+     supports_credentials=True,
+     methods=['GET', 'POST', 'OPTIONS'],
+     allow_headers=['Content-Type', 'Accept', 'Origin', 'Authorization'],
+     expose_headers=['Content-Type', 'Content-Length'])
 
 # Thread pool for async operations
 executor = ThreadPoolExecutor(max_workers=4)
@@ -58,6 +71,23 @@ def create_error_response(message: str, status_code: int = 500, error_type: str 
             "timestamp": datetime.now().isoformat()
         }
     }), status_code
+
+# =============================================================================
+# CORS PREFLIGHT HANDLER
+# =============================================================================
+
+@app.after_request
+def after_request(response):
+    """Add CORS headers to every response for allowed origins only."""
+    origin = request.headers.get('Origin')
+    # Only set CORS headers if origin is in allowed list
+    if origin in allowed_origins:
+        response.headers['Access-Control-Allow-Origin'] = origin
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Accept, Authorization'
+        response.headers['Access-Control-Allow-Credentials'] = 'true'
+        response.headers['Access-Control-Max-Age'] = '3600'
+    return response
 
 # =============================================================================
 # HEALTH AND STATUS ENDPOINTS

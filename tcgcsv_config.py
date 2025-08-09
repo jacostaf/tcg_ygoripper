@@ -78,7 +78,7 @@ BATCH_PROCESSING_SIZE = int(os.getenv("BATCH_PROCESSING_SIZE", 1000))
 # =============================================================================
 
 # CORS Configuration
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:7001,http://127.0.0.1:7001,http://localhost:3000,http://127.0.0.1:3000,https://ygopwa.onrender.com").split(",")
 CORS_ALLOW_CREDENTIALS = os.getenv("CORS_ALLOW_CREDENTIALS", "true").lower() == "true"
 
 # Security

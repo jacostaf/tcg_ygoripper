@@ -62,6 +62,7 @@ def create_app() -> Flask:
         resources={r"/*": {
             "origins": [
                 "http://localhost:3000",
+                "http://localhost:7001"
                 "http://127.0.0.1:3000",
                 "https://ygopwa.onrender.com"
             ],
