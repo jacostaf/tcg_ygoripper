@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Dict, Any, List, Optional
 from concurrent.futures import ThreadPoolExecutor
 
-from flask import Flask, jsonify, request
+from flask import Flask, Blueprint, jsonify, request
 from flask_cors import CORS
 
 from tcgcsv_config import (
@@ -28,15 +28,21 @@ logger = logging.getLogger(__name__)
 
 # Create Flask app
 app = Flask(__name__)
+
+# Create API v1 Blueprint
+api_v1 = Blueprint('api_v1', __name__, url_prefix='/api/v1')
+
 # Secure CORS configuration with specific allowed origins
 allowed_origins = [
     "http://localhost:7001",
-    "http://127.0.0.1:7001", 
+    "http://127.0.0.1:7001",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
     "https://ygopwa.onrender.com"
 ]
-CORS(app, 
+CORS(app,
      origins=allowed_origins,
      supports_credentials=True,
      methods=['GET', 'POST', 'OPTIONS'],
@@ -93,7 +99,7 @@ def after_request(response):
 # HEALTH AND STATUS ENDPOINTS
 # =============================================================================
 
-@app.route('/health', methods=['GET'])
+@api_v1.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint."""
     try:
@@ -117,7 +123,7 @@ def health_check():
         logger.error(f"Health check failed: {e}")
         return create_error_response(f"Service unhealthy: {str(e)}")
 
-@app.route('/status', methods=['GET'])
+@api_v1.route('/status', methods=['GET'])
 def get_status():
     """Get detailed service status."""
     try:
@@ -152,8 +158,8 @@ def get_status():
 # CARD SETS ENDPOINTS
 # =============================================================================
 
-@app.route('/card-sets', methods=['GET'])
-@app.route('/card-sets/from-cache', methods=['GET'])
+@api_v1.route('/card-sets', methods=['GET'])
+@api_v1.route('/card-sets/from-cache', methods=['GET'])
 def get_card_sets():
     """Get all card sets from TCGcsv."""
     try:
@@ -188,7 +194,7 @@ def get_card_sets():
         logger.error(f"Failed to get card sets: {e}")
         return create_error_response(f"Failed to retrieve card sets: {str(e)}")
 
-@app.route('/card-sets/<set_identifier>/cards', methods=['GET'])
+@api_v1.route('/card-sets/<set_identifier>/cards', methods=['GET'])
 def get_set_cards(set_identifier: str):
     """Get all cards for a specific set."""
     try:
@@ -255,7 +261,7 @@ def get_set_cards(set_identifier: str):
         logger.error(f"Failed to get cards for set {set_identifier}: {e}")
         return create_error_response(f"Failed to retrieve cards for set: {str(e)}")
 
-@app.route('/card-sets/search/<query>', methods=['GET'])
+@api_v1.route('/card-sets/search/<query>', methods=['GET'])
 def search_card_sets(query: str):
     """Search card sets by name."""
     try:
@@ -294,7 +300,7 @@ def search_card_sets(query: str):
 # CARD SEARCH ENDPOINTS
 # =============================================================================
 
-@app.route('/cards/search', methods=['GET'])
+@api_v1.route('/cards/search', methods=['GET'])
 def search_cards():
     """Enhanced card search by name, card number, or other criteria."""
     try:
@@ -407,7 +413,7 @@ def search_cards():
         logger.error(f"Failed to search cards: {e}")
         return create_error_response(f"Failed to search cards: {str(e)}")
 
-@app.route('/cards/bulk-search', methods=['POST'])
+@api_v1.route('/cards/bulk-search', methods=['POST'])
 def bulk_card_search():
     """Search for multiple cards at once."""
     try:
@@ -525,7 +531,7 @@ def bulk_card_search():
         logger.error(f"Failed to perform bulk search: {e}")
         return create_error_response(f"Failed to perform bulk search: {str(e)}")
 
-@app.route('/cards/by-number/<card_number>', methods=['GET'])
+@api_v1.route('/cards/by-number/<card_number>', methods=['GET'])
 def get_card_by_number(card_number: str):
     """Get card by card number (e.g., BLMM-EN001)."""
     try:
@@ -599,7 +605,7 @@ def get_card_by_number(card_number: str):
 # CARD PRICING ENDPOINT (COMPATIBILITY)
 # =============================================================================
 
-@app.route('/cards/price', methods=['POST'])
+@api_v1.route('/cards/price', methods=['POST'])
 def get_card_price():
     """Get price information for a specific card (maintains compatibility)."""
     try:
@@ -725,11 +731,22 @@ def get_card_price():
             search_term = card_number if card_number else card_name
             return create_error_response(f"Card '{search_term}' not found", 404, "not_found")
         
-        # Format response similar to original API
+        # Format response with both camelCase and snake_case for compatibility
+        # Frontend expects snake_case properties wrapped in data object
         price_data = {
-            'success': True,
+            # snake_case for frontend compatibility
+            'card_name': found_card.name,
+            'card_number': found_card.ext_number,
+            'card_rarity': found_card.ext_rarity,
+            'set_code': set_code,
+            'tcg_price': found_card.low_price or found_card.mid_price or found_card.market_price,
+            'tcg_market_price': found_card.market_price,
+            'low_price': found_card.low_price,
+            'mid_price': found_card.mid_price,
+            'high_price': found_card.high_price,
+            'image_url': found_card.image_url,
+            # camelCase for backward compatibility
             'cardName': found_card.name,
-            'card_number': found_card.ext_number,  # Use underscore for backward compatibility
             'setCode': set_code,
             'rarity': found_card.ext_rarity,
             'tcgPrice': found_card.low_price or found_card.mid_price or found_card.market_price,
@@ -741,8 +758,9 @@ def get_card_price():
             'source': 'tcgcsv',
             'productId': found_card.product_id
         }
-        
-        return jsonify(price_data)
+
+        # Use create_success_response to wrap data consistently
+        return create_success_response(price_data, f"Price data for {found_card.name}")
         
     except Exception as e:
         logger.error(f"Failed to get card price: {e}")
@@ -752,7 +770,7 @@ def get_card_price():
 # CACHE ENDPOINTS
 # =============================================================================
 
-@app.route('/cache/stats', methods=['GET'])
+@api_v1.route('/cache/stats', methods=['GET'])
 def get_cache_stats():
     """Get cache statistics."""
     try:
@@ -768,7 +786,7 @@ def get_cache_stats():
         logger.error(f"Failed to get cache stats: {e}")
         return create_error_response(f"Failed to get cache stats: {str(e)}")
 
-@app.route('/cache/refresh', methods=['POST'])
+@api_v1.route('/cache/refresh', methods=['POST'])
 def refresh_cache():
     """Force refresh cache from TCGcsv."""
     try:
@@ -802,11 +820,14 @@ def refresh_cache():
 # =============================================================================
 
 if ENABLE_DEBUG_ENDPOINTS:
-    @app.route('/debug/config', methods=['GET'])
+    @api_v1.route('/debug/config', methods=['GET'])
     def debug_config():
         """Get configuration (debug only)."""
         config_validation = validate_config()
         return create_success_response(config_validation)
+
+# Register the API v1 blueprint with the app
+app.register_blueprint(api_v1)
 
 # =============================================================================
 # ERROR HANDLERS
