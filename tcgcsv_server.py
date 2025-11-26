@@ -6,6 +6,7 @@ Thread-safe Flask server using TCGcsv.com as data source
 import asyncio
 import logging
 import sys
+import threading
 import requests
 from datetime import datetime
 from typing import Dict, Any, List, Optional
@@ -57,6 +58,34 @@ from tcgcsv_simple_app import SimpleCache, CardSet, Card, fetch_card_sets, fetch
 
 # Global cache
 cache = SimpleCache()
+
+def initialize_global_index():
+    """Background task to load all cards into the global index."""
+    logger.info("Starting global index initialization...")
+    try:
+        sets = cache.get_sets()
+        if not sets:
+            sets = fetch_card_sets()
+            cache.update_sets(sets)
+        
+        total_sets = len(sets)
+        logger.info(f"Found {total_sets} sets. Loading cards...")
+        
+        for i, card_set in enumerate(sets):
+            # Check if cards are already loaded
+            if not cache.get_cards(card_set.group_id):
+                cards = fetch_cards_for_set(card_set.group_id)
+                cache.update_cards(card_set.group_id, cards)
+            
+            if (i + 1) % 10 == 0:
+                logger.info(f"Loaded cards for {i + 1}/{total_sets} sets")
+                
+        logger.info("Global index initialization complete.")
+    except Exception as e:
+        logger.error(f"Global index initialization failed: {e}")
+
+# Start global index initialization in background
+threading.Thread(target=initialize_global_index, daemon=True).start()
 
 def create_success_response(data: Any, message: str = "Success") -> Dict[str, Any]:
     """Create standardized success response."""
@@ -353,35 +382,27 @@ def search_cards():
                        (card.ext_number and query_lower in card.ext_number.lower()):
                         matching_cards.append((card, target_set_code))
         else:
-            # Search across all sets (limit to avoid timeout)
-            sets = cache.get_sets()
-            if not sets:
-                sets = fetch_card_sets()
-                cache.update_sets(sets)
+            # Search across all sets using global index
+            global_matches = cache.search_global_index(query)
             
-            # Search in recent sets first (last 20 sets)
-            recent_sets = sets[:20]
-            for card_set in recent_sets:
-                cards = cache.get_cards(card_set.group_id)
-                if not cards:
-                    cards = fetch_cards_for_set(card_set.group_id)
-                    cache.update_cards(card_set.group_id, cards)
+            for card in global_matches:
+                card_set = cache.get_set_by_id(card.group_id)
+                set_code = card_set.abbreviation if card_set else "UNKNOWN"
                 
-                for card in cards:
-                    if search_type == 'number':
-                        if card.ext_number and query_lower in card.ext_number.lower():
-                            matching_cards.append((card, card_set.abbreviation))
-                    elif search_type == 'name':
-                        if query_lower in card.name.lower():
-                            matching_cards.append((card, card_set.abbreviation))
-                    else:  # search_type == 'all'
-                        if (query_lower in card.name.lower()) or \
-                           (card.ext_number and query_lower in card.ext_number.lower()):
-                            matching_cards.append((card, card_set.abbreviation))
-                
-                # Limit results to avoid timeout
-                if len(matching_cards) >= 50:
-                    break
+                if search_type == 'number':
+                    if card.ext_number and query_lower in card.ext_number.lower():
+                        matching_cards.append((card, set_code))
+                elif search_type == 'name':
+                    if query_lower in card.name.lower():
+                        matching_cards.append((card, set_code))
+                else:  # search_type == 'all'
+                    if (query_lower in card.name.lower()) or \
+                       (card.ext_number and query_lower in card.ext_number.lower()):
+                        matching_cards.append((card, set_code))
+            
+            # Limit results to avoid timeout
+            if len(matching_cards) > 50:
+                matching_cards = matching_cards[:50]
         
         # Convert to frontend format
         cards_data = []
@@ -480,30 +501,23 @@ def bulk_card_search():
                            (card.ext_number and query_lower in card.ext_number.lower()):
                             matching_cards.append((card, target_set_code))
             else:
-                # Search in recent sets only for bulk operations
-                sets = cache.get_sets()
-                if not sets:
-                    sets = fetch_card_sets()
-                    cache.update_sets(sets)
+                # Search using global index for bulk operations
+                global_matches = cache.search_global_index(query)
                 
-                recent_sets = sets[:5]  # Limit for bulk search
-                for card_set in recent_sets:
-                    cards = cache.get_cards(card_set.group_id)
-                    if not cards:
-                        cards = fetch_cards_for_set(card_set.group_id)
-                        cache.update_cards(card_set.group_id, cards)
+                for card in global_matches:
+                    card_set = cache.get_set_by_id(card.group_id)
+                    set_code = card_set.abbreviation if card_set else "UNKNOWN"
                     
-                    for card in cards:
-                        if search_type == 'number':
-                            if card.ext_number and query_lower in card.ext_number.lower():
-                                matching_cards.append((card, card_set.abbreviation))
-                        elif search_type == 'name':
-                            if query_lower in card.name.lower():
-                                matching_cards.append((card, card_set.abbreviation))
-                        else:  # search_type == 'all'
-                            if (query_lower in card.name.lower()) or \
-                               (card.ext_number and query_lower in card.ext_number.lower()):
-                                matching_cards.append((card, card_set.abbreviation))
+                    if search_type == 'number':
+                        if card.ext_number and query_lower in card.ext_number.lower():
+                            matching_cards.append((card, set_code))
+                    elif search_type == 'name':
+                        if query_lower in card.name.lower():
+                            matching_cards.append((card, set_code))
+                    else:  # search_type == 'all'
+                        if (query_lower in card.name.lower()) or \
+                           (card.ext_number and query_lower in card.ext_number.lower()):
+                            matching_cards.append((card, set_code))
                     
                     # Limit results per query for bulk operations
                     if len(matching_cards) >= 5:
