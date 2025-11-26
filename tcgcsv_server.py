@@ -54,10 +54,8 @@ CORS(app,
 executor = ThreadPoolExecutor(max_workers=4)
 
 # Simple synchronous version of the service
-from tcgcsv_simple_app import SimpleCache, CardSet, Card, fetch_card_sets, fetch_cards_for_set
-
-# Global cache
-cache = SimpleCache()
+# Simple synchronous version of the service
+from tcg_core import cache, CardSet, Card, fetch_card_sets, fetch_cards_for_set
 
 def initialize_global_index():
     """Background task to load all cards into the global index."""
@@ -802,29 +800,11 @@ def get_cache_stats():
 
 @api_v1.route('/cache/refresh', methods=['POST'])
 def refresh_cache():
-    """Force refresh cache from TCGcsv."""
+    """Force refresh the cache."""
     try:
-        # Refresh sets
-        logger.info("Force refreshing card sets...")
-        card_sets = fetch_card_sets()
-        cache.update_sets(card_sets)
-        
-        # Optionally refresh cards
-        refresh_cards = request.json and request.json.get('refresh_cards', False)
-        cards_refreshed = 0
-        
-        if refresh_cards:
-            logger.info("Force refreshing all card data...")
-            for card_set in card_sets[:5]:  # Limit to first 5 sets to avoid timeout
-                cards = fetch_cards_for_set(card_set.group_id)
-                cache.update_cards(card_set.group_id, cards)
-                cards_refreshed += 1
-        
-        return create_success_response({
-            'sets_refreshed': len(card_sets),
-            'cards_sets_refreshed': cards_refreshed
-        }, "Cache refreshed successfully")
-        
+        # Run refresh in background to avoid blocking
+        threading.Thread(target=cache.refresh, daemon=True).start()
+        return create_success_response(None, "Cache refresh started in background")
     except Exception as e:
         logger.error(f"Failed to refresh cache: {e}")
         return create_error_response(f"Failed to refresh cache: {str(e)}")
