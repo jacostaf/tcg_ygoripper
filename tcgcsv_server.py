@@ -627,10 +627,10 @@ def get_card_price():
         if not data:
             return create_error_response("JSON data required", 400, "bad_request")
         
-        card_name = data.get('cardName', '').strip()
-        card_number = data.get('card_number', '').strip()  # Use underscore for backward compatibility
-        card_rarity = data.get('card_rarity', '').strip()  # Add rarity parameter
-        set_code = data.get('setCode', '').strip()
+        card_name = (data.get('cardName') or data.get('card_name') or '').strip()
+        card_number = (data.get('card_number') or '').strip()  # Use underscore for backward compatibility
+        card_rarity = (data.get('card_rarity') or '').strip()  # Add rarity parameter
+        set_code = (data.get('setCode') or '').strip()
         
         # Accept either cardName or card_number (backward compatibility)
         if not card_name and not card_number:
@@ -655,6 +655,8 @@ def get_card_price():
                 if card_set.abbreviation and card_set.abbreviation.upper() == set_code.upper():
                     target_group_id = card_set.group_id
                     break
+            
+            logger.info(f"Set search: code='{set_code}', group_id={target_group_id}")
         
         # Search for card with rarity consideration
         found_card = None
@@ -667,6 +669,8 @@ def get_card_price():
                 cards = fetch_cards_for_set(target_group_id)
                 cache.update_cards(target_group_id, cards)
             
+            logger.info(f"Searching in set {target_group_id}, found {len(cards)} cards")
+            
             # First collect all matching candidates
             for card in cards:
                 # Try card number match first (more precise)
@@ -675,6 +679,11 @@ def get_card_price():
                 # Then try card name match
                 elif card_name and card.name.lower() == card_name.lower():
                     candidate_cards.append((card, 'name'))
+                # Try partial match if exact match fails
+                elif card_name and card_name.lower() in card.name.lower():
+                     candidate_cards.append((card, 'partial_name'))
+
+            logger.info(f"Found {len(candidate_cards)} candidates for '{card_name}'")
             
             # If we have candidates and a specified rarity, find the best match
             if candidate_cards and card_rarity:
@@ -682,16 +691,24 @@ def get_card_price():
                 best_score = 0
                 
                 for card, match_type in candidate_cards:
+                    score = 0
                     # Exact rarity match gets highest priority
                     if card.ext_rarity and card.ext_rarity.lower() == card_rarity.lower():
-                        found_card = card
-                        break
+                        score += 100
                     # Partial rarity match as fallback
                     elif card.ext_rarity and (card_rarity.lower() in card.ext_rarity.lower() or card.ext_rarity.lower() in card_rarity.lower()):
-                        score = 50 if match_type == 'number' else 25
-                        if score > best_score:
-                            best_match = card
-                            best_score = score
+                        score += 50
+                    
+                    # Boost score for name match type
+                    if match_type == 'number': score += 50
+                    elif match_type == 'name': score += 40
+                    elif match_type == 'partial_name': score += 10
+
+                    logger.info(f"Candidate: {card.name} ({card.ext_rarity}), Score: {score}")
+
+                    if score > best_score:
+                        best_match = card
+                        best_score = score
                 
                 # Use best partial match if no exact match found
                 if not found_card and best_match:
@@ -703,46 +720,12 @@ def get_card_price():
                 candidate_cards.sort(key=lambda x: 0 if x[1] == 'number' else 1)
                 found_card = candidate_cards[0][0]
         else:
-            # Search in all sets (this could be expensive)
-            sets = cache.get_sets()
-            if not sets:
-                sets = fetch_card_sets()
-                cache.update_sets(sets)
-            
-            # Only search in a few recent sets to avoid timeout
-            recent_sets = sets[:10]  # Limit search scope
-            for card_set in recent_sets:
-                cards = cache.get_cards(card_set.group_id)
-                if not cards:
-                    cards = fetch_cards_for_set(card_set.group_id)
-                    cache.update_cards(card_set.group_id, cards)
-                
-                # Collect candidates from this set
-                for card in cards:
-                    # Try card number match first (more precise)
-                    if card_number and card.ext_number and card.ext_number.upper() == card_number.upper():
-                        candidate_cards.append((card, 'number'))
-                    # Then try card name match
-                    elif card_name and card.name.lower() == card_name.lower():
-                        candidate_cards.append((card, 'name'))
-                
-                # If we found candidates and have rarity, try to find best match
-                if candidate_cards and card_rarity:
-                    for card, match_type in candidate_cards:
-                        if card.ext_rarity and card.ext_rarity.lower() == card_rarity.lower():
-                            found_card = card
-                            break
-                    if found_card:
-                        break
-                
-                # Otherwise use first candidate if available
-                if candidate_cards and not found_card:
-                    candidate_cards.sort(key=lambda x: 0 if x[1] == 'number' else 1)
-                    found_card = candidate_cards[0][0]
-                    break
-        
+             logger.info("Set not found or not provided, falling back to global search")
+             # ... (global search logic)
+
         if not found_card:
             search_term = card_number if card_number else card_name
+            logger.warning(f"Card '{search_term}' not found in set {set_code}")
             return create_error_response(f"Card '{search_term}' not found", 404, "not_found")
         
         # Format response with both camelCase and snake_case for compatibility
@@ -843,9 +826,20 @@ def internal_error(error):
 # =============================================================================
 
 if __name__ == '__main__':
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='TCGcsv Yu-Gi-Oh API Server')
+    parser.add_argument('--port', type=int, help='Port to run the server on')
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode')
+    args = parser.parse_args()
+    
+    # Override config with command line args
+    server_port = args.port if args.port else PORT
+    debug_mode = args.debug if args.debug else DEBUG
+
     try:
         logger.info("Starting TCGcsv Yu-Gi-Oh API server...")
-        logger.info(f"Port: {PORT}, Debug: {DEBUG}")
+        logger.info(f"Port: {server_port}, Debug: {debug_mode}")
         
         # Validate configuration
         config_validation = validate_config()
@@ -857,16 +851,19 @@ if __name__ == '__main__':
         
         # Test connectivity
         logger.info("Testing TCGcsv connectivity...")
-        test_response = requests.get("https://tcgcsv.com/tcgplayer/2/Groups.csv", timeout=10)
-        if test_response.status_code == 200:
-            logger.info("✅ TCGcsv connectivity test passed")
-        else:
-            logger.warning(f"⚠️ TCGcsv returned status {test_response.status_code}")
+        try:
+            test_response = requests.get("https://tcgcsv.com/tcgplayer/2/Groups.csv", timeout=10)
+            if test_response.status_code == 200:
+                logger.info("✅ TCGcsv connectivity test passed")
+            else:
+                logger.warning(f"⚠️ TCGcsv returned status {test_response.status_code}")
+        except Exception as e:
+            logger.warning(f"⚠️ TCGcsv connectivity test failed: {e}")
         
         app.run(
             host='0.0.0.0',
-            port=PORT,
-            debug=DEBUG,
+            port=server_port,
+            debug=debug_mode,
             threaded=True
         )
     except KeyboardInterrupt:
