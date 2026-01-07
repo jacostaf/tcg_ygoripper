@@ -134,6 +134,15 @@ BACKUP_INTERVAL_HOURS = int(os.getenv("BACKUP_INTERVAL_HOURS", 24))
 MAX_BACKUP_FILES = int(os.getenv("MAX_BACKUP_FILES", 7))
 
 # =============================================================================
+# SUPABASE CONFIGURATION
+# =============================================================================
+
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+SUPABASE_SYNC_ENABLED = os.getenv("SUPABASE_SYNC_ENABLED", "false").lower() == "true"
+
+
+# =============================================================================
 # FEATURE FLAGS
 # =============================================================================
 

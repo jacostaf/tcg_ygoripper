@@ -798,6 +798,55 @@ def refresh_cache():
 # DEBUG ENDPOINTS
 # =============================================================================
 
+# ... (existing debug endpoints if any)
+
+# =============================================================================
+# ADMIN ENDPOINTS
+# =============================================================================
+
+from supabase_sync import syncer
+
+@api_v1.route('/admin/sync-prices', methods=['POST'])
+def admin_sync_prices():
+    """Trigger manual price sync to Supabase."""
+    try:
+        # Run in background
+        threading.Thread(target=syncer.run_sync, daemon=True).start()
+        return create_success_response(None, "Price sync started in background")
+    except Exception as e:
+        return create_error_response(f"Failed to start sync: {str(e)}")
+
+@api_v1.route('/admin/refresh-leaderboards', methods=['POST'])
+def admin_refresh_leaderboards():
+    """Trigger manual leaderboard refresh."""
+    try:
+        # Call RPC directly
+        result = syncer._request("POST", "rpc/refresh_leaderboards")
+        return create_success_response(result, "Leaderboard refresh triggered")
+    except Exception as e:
+        return create_error_response(f"Failed to refresh leaderboards: {str(e)}")
+
+# =============================================================================
+# SCHEDULER
+# =============================================================================
+
+def run_scheduler():
+    """Background scheduler for periodic tasks."""
+    import time
+    logger.info("Scheduler started.")
+    while True:
+        # Wait for 24 hours (or config)
+        # For now, hardcoded to 24h = 86400s
+        time.sleep(86400)
+        logger.info("Scheduler waking up for daily sync...")
+        try:
+            syncer.run_sync()
+        except Exception as e:
+            logger.error(f"Scheduled sync failed: {e}")
+
+# Start scheduler in background
+threading.Thread(target=run_scheduler, daemon=True).start()
+
 if ENABLE_DEBUG_ENDPOINTS:
     @api_v1.route('/debug/config', methods=['GET'])
     def debug_config():
