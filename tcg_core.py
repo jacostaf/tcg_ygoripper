@@ -64,6 +64,7 @@ class PersistentCache:
         self.set_map: Dict[int, CardSet] = {}
         self.cards: Dict[int, List[Card]] = {}
         self.global_index: Dict[str, List[Card]] = {}
+        self.product_id_index: Dict[int, Card] = {}  # O(1) lookup by product_id
         self.last_updated = None
         self.load_from_disk()
 
@@ -82,6 +83,7 @@ class PersistentCache:
                     'set_map': self.set_map,
                     'cards': self.cards,
                     'global_index': self.global_index,
+                    'product_id_index': self.product_id_index,
                     'last_updated': self.last_updated
                 }
                 with open(CACHE_FILE, 'wb') as f:
@@ -104,7 +106,15 @@ class PersistentCache:
                     self.set_map = data.get('set_map', {})
                     self.cards = data.get('cards', {})
                     self.global_index = data.get('global_index', {})
+                    self.product_id_index = data.get('product_id_index', {})
                     self.last_updated = data.get('last_updated')
+                # Rebuild product_id_index if missing (for existing caches)
+                if not self.product_id_index and self.cards:
+                    for cards_list in self.cards.values():
+                        for card in cards_list:
+                            if card.product_id:
+                                self.product_id_index[card.product_id] = card
+                    logger.info(f"Rebuilt product_id_index with {len(self.product_id_index)} entries")
                 logger.info(f"Loaded cache from disk. Sets: {len(self.card_sets)}, Cards: {sum(len(c) for c in self.cards.values())}")
         except Exception as e:
             logger.error(f"Failed to load cache from disk: {e}")
@@ -134,16 +144,24 @@ class PersistentCache:
         with self._lock:
             return self.cards.get(group_id, [])
 
+    def get_card_by_product_id(self, product_id: int) -> Optional[Card]:
+        """O(1) lookup by TCGcsv product_id."""
+        with self._lock:
+            return self.product_id_index.get(product_id)
+
     def update_cards(self, group_id: int, cards: List[Card]):
         with self._lock:
             self.cards[group_id] = cards
-            # Update global index
+            # Update global index and product_id index
             for card in cards:
                 if card.name not in self.global_index:
                     self.global_index[card.name] = []
                 # Avoid duplicates
                 if card not in self.global_index[card.name]:
                     self.global_index[card.name].append(card)
+                # Build product_id index for O(1) lookup
+                if card.product_id:
+                    self.product_id_index[card.product_id] = card
             self.save_to_disk()
 
     def search_global_index(self, query: str) -> List[Card]:
@@ -162,6 +180,7 @@ class PersistentCache:
             self.set_map = {}
             self.cards = {}
             self.global_index = {}
+            self.product_id_index = {}
             self.last_updated = None
             if os.path.exists(CACHE_FILE):
                 try:

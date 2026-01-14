@@ -52,6 +52,7 @@ def extract_art_version(card_name: str) -> Optional[str]:
             return art_version
 
     # Then, try named art variants (like "Arkana", "Joey Wheeler", etc.)
+    # Only match specific known art variant names - NOT generic patterns that could capture rarity names
     named_patterns = [
         r"\b(arkana)\b",  # "arkana" (case insensitive)
         r"\b(joey\s+wheeler)\b",  # "joey wheeler"
@@ -59,8 +60,7 @@ def extract_art_version(card_name: str) -> Optional[str]:
         r"\b(pharaoh)\b",  # "pharaoh"
         r"\b(anime)\b",  # "anime"
         r"\b(manga)\b",  # "manga"
-        r"-([a-zA-Z]+(?:\s+[a-zA-Z]+)*)-",  # Generic pattern for "-name-" format
-        r"\(([a-zA-Z]+(?:\s+[a-zA-Z]+)*)\)",  # Generic pattern for "(name)" format
+        # Removed generic patterns that would incorrectly capture rarity names like "Quarter Century Secret Rare"
     ]
 
     for pattern in named_patterns:

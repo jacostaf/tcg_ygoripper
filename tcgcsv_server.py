@@ -626,23 +626,52 @@ def get_card_price():
         data = request.get_json()
         if not data:
             return create_error_response("JSON data required", 400, "bad_request")
-        
+
+        # FAST PATH: Direct lookup by product_id (O(1))
+        product_id = data.get('product_id') or data.get('tcgcsv_product_id')
+        if product_id:
+            try:
+                product_id = int(product_id)
+                found_card = cache.get_card_by_product_id(product_id)
+                if found_card:
+                    logger.info(f"Direct lookup by product_id={product_id}: {found_card.name}")
+                    # Get set info for response
+                    card_set = cache.get_set_by_id(found_card.group_id)
+                    set_code = card_set.abbreviation if card_set else ''
+
+                    price_data = {
+                        'card_name': found_card.name,
+                        'card_number': found_card.ext_number,
+                        'card_rarity': found_card.ext_rarity,
+                        'set_code': set_code,
+                        'tcg_price': found_card.low_price or found_card.mid_price or found_card.market_price,
+                        'tcg_market_price': found_card.market_price,
+                        'tcg_low_price': found_card.low_price,
+                        'tcg_mid_price': found_card.mid_price,
+                        'tcg_high_price': found_card.high_price,
+                        'product_id': found_card.product_id,
+                        'image_url': found_card.image_url,
+                    }
+                    return create_success_response(price_data, f"Found card by product_id")
+            except (ValueError, TypeError):
+                pass  # Invalid product_id, fall through to name-based lookup
+
         card_name = (data.get('cardName') or data.get('card_name') or '').strip()
-        card_number = (data.get('card_number') or '').strip()  # Use underscore for backward compatibility
-        card_rarity = (data.get('card_rarity') or '').strip()  # Add rarity parameter
+        card_number = (data.get('card_number') or '').strip()
+        card_rarity = (data.get('card_rarity') or '').strip()
         set_code = (data.get('setCode') or '').strip()
-        
+
         # Accept either cardName or card_number (backward compatibility)
         if not card_name and not card_number:
-            return create_error_response("Either 'cardName' or 'card_number' is required", 400, "bad_request")
-        
+            return create_error_response("Either 'cardName', 'card_number', or 'product_id' is required", 400, "bad_request")
+
         # If we have a card number, try to find the card by number first
         if card_number:
             # Extract set code from card number if not provided (e.g., BLMM-EN001 -> BLMM)
             if not set_code and '-' in card_number:
                 potential_set_code = card_number.split('-')[0]
                 set_code = potential_set_code
-        
+
         # Find set if provided
         target_group_id = None
         if set_code:
@@ -650,75 +679,97 @@ def get_card_price():
             if not sets:
                 sets = fetch_card_sets()
                 cache.update_sets(sets)
-            
+
             for card_set in sets:
                 if card_set.abbreviation and card_set.abbreviation.upper() == set_code.upper():
                     target_group_id = card_set.group_id
                     break
-            
+
             logger.info(f"Set search: code='{set_code}', group_id={target_group_id}")
         
         # Search for card with rarity consideration
         found_card = None
-        candidate_cards = []
-        
+
+        # Helper to clean card names (remove rarity suffix in parentheses)
+        # TCGcsv names often include rarity like "Card Name (Quarter Century Secret Rare)"
+        def clean_card_name(name):
+            if not name:
+                return name
+            import re
+            return re.sub(r'\s*\([^)]*\)\s*$', '', name).strip().lower()
+
         if target_group_id:
             # Search in specific set
             cards = cache.get_cards(target_group_id)
             if not cards:
                 cards = fetch_cards_for_set(target_group_id)
                 cache.update_cards(target_group_id, cards)
-            
+
             logger.info(f"Searching in set {target_group_id}, found {len(cards)} cards")
-            
-            # First collect all matching candidates
-            for card in cards:
-                # Try card number match first (more precise)
-                if card_number and card.ext_number and card.ext_number.upper() == card_number.upper():
-                    candidate_cards.append((card, 'number'))
-                # Then try card name match
-                elif card_name and card.name.lower() == card_name.lower():
-                    candidate_cards.append((card, 'name'))
-                # Try partial match if exact match fails
-                elif card_name and card_name.lower() in card.name.lower():
-                     candidate_cards.append((card, 'partial_name'))
 
-            logger.info(f"Found {len(candidate_cards)} candidates for '{card_name}'")
-            
-            # If we have candidates and a specified rarity, find the best match
-            if candidate_cards and card_rarity:
-                best_match = None
-                best_score = 0
-                
-                for card, match_type in candidate_cards:
-                    score = 0
-                    # Exact rarity match gets highest priority
-                    if card.ext_rarity and card.ext_rarity.lower() == card_rarity.lower():
-                        score += 100
-                    # Partial rarity match as fallback
-                    elif card.ext_rarity and (card_rarity.lower() in card.ext_rarity.lower() or card.ext_rarity.lower() in card_rarity.lower()):
-                        score += 50
-                    
-                    # Boost score for name match type
-                    if match_type == 'number': score += 50
-                    elif match_type == 'name': score += 40
-                    elif match_type == 'partial_name': score += 10
+            # Normalize search name once
+            search_name = clean_card_name(card_name) if card_name else None
 
-                    logger.info(f"Candidate: {card.name} ({card.ext_rarity}), Score: {score}")
+            # STEP 1: Try EXACT match first (name/number + rarity)
+            # This is the fast path for collection cards where we have full metadata
+            if card_rarity:
+                for card in cards:
+                    rarity_match = card.ext_rarity and card.ext_rarity.lower() == card_rarity.lower()
+                    number_match = card_number and card.ext_number and card.ext_number.upper() == card_number.upper()
+                    # Compare cleaned names (without rarity suffix)
+                    cache_name = clean_card_name(card.name)
+                    name_match = search_name and cache_name == search_name
 
-                    if score > best_score:
-                        best_match = card
-                        best_score = score
-                
-                # Use best partial match if no exact match found
-                if not found_card and best_match:
-                    found_card = best_match
-            
-            # If no rarity specified or no rarity matches, use first candidate (prefer number matches)
-            if not found_card and candidate_cards:
-                # Sort by match type (number matches first)
-                candidate_cards.sort(key=lambda x: 0 if x[1] == 'number' else 1)
-                found_card = candidate_cards[0][0]
+                    if rarity_match and (number_match or name_match):
+                        found_card = card
+                        logger.info(f"Exact match found: {card.name} ({card.ext_rarity})")
+                        break
+
+            # STEP 2: If no exact match, fall back to fuzzy candidate scoring
+            # This is for pack openings or searches with incomplete data
+            if not found_card:
+                candidate_cards = []
+                for card in cards:
+                    cache_name = clean_card_name(card.name)
+                    if card_number and card.ext_number and card.ext_number.upper() == card_number.upper():
+                        candidate_cards.append((card, 'number'))
+                    elif search_name and cache_name == search_name:
+                        candidate_cards.append((card, 'name'))
+                    elif search_name and search_name in cache_name:
+                        candidate_cards.append((card, 'partial_name'))
+
+                if candidate_cards:
+                    logger.info(f"No exact match, found {len(candidate_cards)} candidates for '{card_name}'")
+
+                    if card_rarity:
+                        # Score candidates by rarity similarity
+                        best_match = None
+                        best_score = 0
+
+                        for card, match_type in candidate_cards:
+                            score = 0
+                            if card.ext_rarity and card.ext_rarity.lower() == card_rarity.lower():
+                                score += 100
+                            elif card.ext_rarity and (card_rarity.lower() in card.ext_rarity.lower() or card.ext_rarity.lower() in card_rarity.lower()):
+                                score += 50
+
+                            if match_type == 'number': score += 50
+                            elif match_type == 'name': score += 40
+                            elif match_type == 'partial_name': score += 10
+
+                            logger.debug(f"Candidate: {card.name} ({card.ext_rarity}), Score: {score}")
+
+                            if score > best_score:
+                                best_match = card
+                                best_score = score
+
+                        if best_match:
+                            found_card = best_match
+
+                    # No rarity specified - prefer number matches
+                    if not found_card:
+                        candidate_cards.sort(key=lambda x: 0 if x[1] == 'number' else 1)
+                        found_card = candidate_cards[0][0]
         else:
              logger.info("Set not found or not provided, falling back to global search")
              # ... (global search logic)
@@ -804,27 +855,139 @@ def refresh_cache():
 # ADMIN ENDPOINTS
 # =============================================================================
 
-from supabase_sync import syncer
+from supabase_sync import syncer, get_progress
+from tcg_core import cache as tcg_cache
+
+@api_v1.route('/admin/refresh-catalog', methods=['POST'])
+def admin_refresh_catalog():
+    """Refresh the card catalog from TCGcsv (fetches all sets and cards)."""
+    try:
+        def do_refresh():
+            logger.info("Starting TCGcsv catalog refresh...")
+            tcg_cache.refresh()
+            total_cards = sum(len(cards) for cards in tcg_cache.cards.values())
+            logger.info(f"Catalog refresh complete. Sets: {len(tcg_cache.card_sets)}, Cards: {total_cards}")
+
+        # Run in background (this can take several minutes)
+        threading.Thread(target=do_refresh, daemon=True).start()
+        return create_success_response({
+            "current_sets": len(tcg_cache.card_sets),
+            "current_cards": sum(len(cards) for cards in tcg_cache.cards.values())
+        }, "Catalog refresh started in background. This may take several minutes.")
+    except Exception as e:
+        logger.error(f"Catalog refresh failed: {e}")
+        return create_error_response(f"Failed to start catalog refresh: {str(e)}")
+
+@api_v1.route('/admin/catalog-status', methods=['GET'])
+def admin_catalog_status():
+    """Get current catalog cache status."""
+    try:
+        total_cards = sum(len(cards) for cards in tcg_cache.cards.values())
+        return create_success_response({
+            "sets_count": len(tcg_cache.card_sets),
+            "cards_count": total_cards,
+            "last_updated": tcg_cache.last_updated.isoformat() if tcg_cache.last_updated else None
+        }, "Catalog status")
+    except Exception as e:
+        return create_error_response(f"Failed to get catalog status: {str(e)}")
 
 @api_v1.route('/admin/sync-prices', methods=['POST'])
 def admin_sync_prices():
-    """Trigger manual price sync to Supabase."""
+    """Trigger manual price sync to Supabase (uploads local cache to DB)."""
     try:
         # Run in background
         threading.Thread(target=syncer.run_sync, daemon=True).start()
-        return create_success_response(None, "Price sync started in background")
+        return create_success_response({
+            "cache_sets": len(tcg_cache.card_sets),
+            "cache_cards": sum(len(cards) for cards in tcg_cache.cards.values())
+        }, "Price sync started in background")
     except Exception as e:
         return create_error_response(f"Failed to start sync: {str(e)}")
+
+@api_v1.route('/admin/sync-progress', methods=['GET'])
+def admin_sync_progress():
+    """Get current sync progress."""
+    return create_success_response(get_progress())
 
 @api_v1.route('/admin/refresh-leaderboards', methods=['POST'])
 def admin_refresh_leaderboards():
     """Trigger manual leaderboard refresh."""
     try:
-        # Call RPC directly
-        result = syncer._request("POST", "rpc/refresh_leaderboards")
-        return create_success_response(result, "Leaderboard refresh triggered")
+        # Call RPC with explicit parameters (Supabase RPC requires JSON body)
+        result = syncer._request("POST", "rpc/refresh_leaderboards", data={
+            "p_limit": 100,
+            "p_source": "admin",
+            "p_include_snapshots": True
+        })
+        logger.info(f"Leaderboard refresh result: {result}")
+
+        # Also fetch the latest computed_at from the leaderboard view to verify refresh worked
+        computed_at_check = syncer._request("GET", "leaderboard_value", params={
+            "select": "computed_at",
+            "limit": "1"
+        })
+        logger.info(f"Leaderboard computed_at after refresh: {computed_at_check}")
+
+        return create_success_response({
+            "snapshots_inserted": result,
+            "computed_at": computed_at_check[0]["computed_at"] if computed_at_check else None
+        }, "Leaderboard refresh triggered")
     except Exception as e:
+        logger.error(f"Leaderboard refresh failed: {e}")
         return create_error_response(f"Failed to refresh leaderboards: {str(e)}")
+
+@api_v1.route('/admin/force-refresh-leaderboards', methods=['POST'])
+def admin_force_refresh_leaderboards():
+    """Force refresh leaderboard materialized views (uses simpler non-concurrent refresh)."""
+    try:
+        # Call the new simpler RPC that shows before/after timestamps
+        result = syncer._request("POST", "rpc/force_refresh_leaderboards", data={})
+        logger.info(f"Force refresh result: {result}")
+
+        if result and result.get("success"):
+            return create_success_response(result, "Leaderboards force-refreshed successfully")
+        else:
+            error_msg = result.get("error", "Unknown error") if result else "No response from RPC"
+            logger.error(f"Force refresh failed: {error_msg}")
+            return create_error_response(f"Refresh failed: {error_msg}")
+    except Exception as e:
+        logger.error(f"Force refresh exception: {e}")
+        return create_error_response(f"Failed to force refresh: {str(e)}")
+
+@api_v1.route('/admin/leaderboard-debug', methods=['GET'])
+def admin_leaderboard_debug():
+    """Debug endpoint to check leaderboard state."""
+    try:
+        # Check each materialized view's computed_at
+        value_check = syncer._request("GET", "leaderboard_value", params={
+            "select": "user_id,computed_at",
+            "limit": "5"
+        })
+        quantity_check = syncer._request("GET", "leaderboard_quantity", params={
+            "select": "user_id,computed_at",
+            "limit": "5"
+        })
+        rarity_check = syncer._request("GET", "leaderboard_rarity", params={
+            "select": "user_id,computed_at",
+            "limit": "5"
+        })
+
+        # Check recent snapshots
+        snapshots = syncer._request("GET", "leaderboard_snapshots", params={
+            "select": "leaderboard_type,captured_at,user_id",
+            "order": "captured_at.desc",
+            "limit": "10"
+        })
+
+        return create_success_response({
+            "value_entries": value_check,
+            "quantity_entries": quantity_check,
+            "rarity_entries": rarity_check,
+            "recent_snapshots": snapshots
+        }, "Leaderboard debug info")
+    except Exception as e:
+        logger.error(f"Leaderboard debug failed: {e}")
+        return create_error_response(f"Failed to get debug info: {str(e)}")
 
 # =============================================================================
 # SCHEDULER
