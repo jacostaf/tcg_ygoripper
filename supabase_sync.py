@@ -12,7 +12,7 @@ import threading
 from tcgcsv_config import (
     SUPABASE_URL, SUPABASE_SERVICE_KEY, SUPABASE_SYNC_ENABLED
 )
-from tcg_core import cache, Card, CardSet
+from tcg_core import cache, Card, CardSet, get_effective_set_code
 from ygoapi.utils import extract_art_version
 
 logger = logging.getLogger(__name__)
@@ -158,9 +158,12 @@ class SupabaseSync:
 
         sets_by_code = {}
         for card_set in cache.card_sets:
-            if card_set.abbreviation and card_set.abbreviation not in sets_by_code:
-                sets_by_code[card_set.abbreviation] = {
-                    "set_code": card_set.abbreviation,
+            # Use get_effective_set_code() to resolve set codes for ALL sets
+            # including those without TCGcsv abbreviations (uses YGOProDeck fallback)
+            set_code = get_effective_set_code(card_set)
+            if set_code and set_code not in sets_by_code:
+                sets_by_code[set_code] = {
+                    "set_code": set_code,
                     "name": card_set.name,
                     "release_date": card_set.published_on if card_set.published_on else None
                 }
@@ -189,7 +192,7 @@ class SupabaseSync:
         # Remove art version patterns from name
         name_part = re.sub(r'-*\d+(st|nd|rd|th)?-*art-*', '', name_part, flags=re.IGNORECASE).strip('-')
 
-        set_code = card_set.abbreviation.lower() if card_set.abbreviation else ""
+        set_code = get_effective_set_code(card_set).lower()
         rarity_part = card.ext_rarity.lower().replace(" ", "-") if card.ext_rarity else ""
 
         # Handle card number - may already contain set code like "SUDA-EN050"
@@ -344,10 +347,13 @@ class SupabaseSync:
         cards_to_process = []
         for group_id, cards in cache.cards.items():
             card_set = cache.get_set_by_id(group_id)
-            if not card_set or not card_set.abbreviation:
+            if not card_set:
                 continue
-            set_id = self.set_map.get(card_set.abbreviation)
+            # Use get_effective_set_code() to resolve set codes for ALL sets
+            set_code = get_effective_set_code(card_set)
+            set_id = self.set_map.get(set_code)
             if not set_id:
+                logger.debug(f"Skipping cards for set '{card_set.name}' - no set_id found for code '{set_code}'")
                 continue
 
             for card in cards:

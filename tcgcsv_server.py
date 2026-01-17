@@ -56,8 +56,10 @@ CORS(app,
 executor = ThreadPoolExecutor(max_workers=4)
 
 # Simple synchronous version of the service
-# Simple synchronous version of the service
-from tcg_core import cache, CardSet, Card, fetch_card_sets, fetch_cards_for_set
+from tcg_core import (
+    cache, CardSet, Card, fetch_card_sets, fetch_cards_for_set,
+    get_effective_set_code
+)
 
 def initialize_global_index():
     """Background task to load all cards into the global index."""
@@ -208,10 +210,11 @@ def get_card_sets():
         for card_set in cached_sets:
             set_dict = card_set.to_dict()
             # Map to expected frontend format
+            effective_code = get_effective_set_code(card_set)
             set_dict.update({
-                'id': card_set.abbreviation or str(card_set.group_id),
+                'id': effective_code,
                 'set_name': card_set.name,
-                'set_code': card_set.abbreviation,
+                'set_code': effective_code,
                 'tcg_date': card_set.published_on,
                 'group_id': card_set.group_id
             })
@@ -311,10 +314,11 @@ def search_card_sets(query: str):
         sets_data = []
         for card_set in matching_sets:
             set_dict = card_set.to_dict()
+            effective_code = get_effective_set_code(card_set)
             set_dict.update({
-                'id': card_set.abbreviation or str(card_set.group_id),
+                'id': effective_code,
                 'set_name': card_set.name,
-                'set_code': card_set.abbreviation,
+                'set_code': effective_code,
                 'tcg_date': card_set.published_on
             })
             sets_data.append(set_dict)
@@ -353,7 +357,7 @@ def search_cards():
                 if (card_set.abbreviation and card_set.abbreviation.upper() == set_filter.upper()) or \
                    str(card_set.group_id) == set_filter:
                     target_group_id = card_set.group_id
-                    target_set_code = card_set.abbreviation
+                    target_set_code = get_effective_set_code(card_set)
                     break
         
         # Search for cards
@@ -387,7 +391,7 @@ def search_cards():
             
             for card in global_matches:
                 card_set = cache.get_set_by_id(card.group_id)
-                set_code = card_set.abbreviation if card_set else "UNKNOWN"
+                set_code = get_effective_set_code(card_set) if card_set else "UNKNOWN"
                 
                 if search_type == 'number':
                     if card.ext_number and query_lower in card.ext_number.lower():
@@ -479,7 +483,7 @@ def bulk_card_search():
                     if (card_set.abbreviation and card_set.abbreviation.upper() == set_filter.upper()) or \
                        str(card_set.group_id) == set_filter:
                         target_group_id = card_set.group_id
-                        target_set_code = card_set.abbreviation
+                        target_set_code = get_effective_set_code(card_set)
                         break
             
             if target_group_id:
@@ -506,8 +510,8 @@ def bulk_card_search():
                 
                 for card in global_matches:
                     card_set = cache.get_set_by_id(card.group_id)
-                    set_code = card_set.abbreviation if card_set else "UNKNOWN"
-                    
+                    set_code = get_effective_set_code(card_set) if card_set else "UNKNOWN"
+
                     if search_type == 'number':
                         if card.ext_number and query_lower in card.ext_number.lower():
                             matching_cards.append((card, set_code))
@@ -637,7 +641,7 @@ def get_card_price():
                     logger.info(f"Direct lookup by product_id={product_id}: {found_card.name}")
                     # Get set info for response
                     card_set = cache.get_set_by_id(found_card.group_id)
-                    set_code = card_set.abbreviation if card_set else ''
+                    set_code = get_effective_set_code(card_set) if card_set else ''
 
                     price_data = {
                         'card_name': found_card.name,
@@ -1032,6 +1036,31 @@ def not_found_error(error):
 def internal_error(error):
     logger.error(f"Internal server error: {error}")
     return create_error_response("Internal server error", 500, "internal_error")
+
+# =============================================================================
+# CACHE PRE-WARMING
+# =============================================================================
+
+def prewarm_caches():
+    """Pre-warm TCGcsv caches on server startup for faster first requests."""
+    logger.info("Pre-warming TCGcsv caches...")
+
+    # Pre-load TCGcsv sets if not cached (this is our primary data source)
+    if not cache.get_sets():
+        logger.info("Loading TCGcsv sets...")
+        sets = fetch_card_sets()
+        cache.update_sets(sets)
+        logger.info(f"TCGcsv sets loaded: {len(sets)} sets")
+    else:
+        logger.info(f"TCGcsv sets already cached: {len(cache.get_sets())} sets")
+
+    # Note: YGOProDeck data is loaded lazily only when a set is missing an abbreviation
+    # This keeps startup fast and only fetches fallback data when actually needed
+
+    logger.info("Cache pre-warming complete")
+
+# Pre-warm caches when module is imported (runs when server starts)
+prewarm_caches()
 
 # =============================================================================
 # MAIN ENTRY POINT
