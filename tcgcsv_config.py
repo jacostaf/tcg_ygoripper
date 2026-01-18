@@ -60,7 +60,15 @@ IMAGE_CACHE_DURATION_HOURS = int(os.getenv("IMAGE_CACHE_DURATION_HOURS", 168))  
 # PERFORMANCE & RATE LIMITING
 # =============================================================================
 
-# API Rate Limiting
+# API Rate Limiting (Flask-Limiter)
+# Format: "X per Y" where Y is second, minute, hour, day
+RATE_LIMIT_DEFAULT = os.getenv("RATE_LIMIT_DEFAULT", "60 per minute")
+RATE_LIMIT_SEARCH = os.getenv("RATE_LIMIT_SEARCH", "30 per minute")
+RATE_LIMIT_BULK = os.getenv("RATE_LIMIT_BULK", "10 per minute")
+RATE_LIMIT_ADMIN = os.getenv("RATE_LIMIT_ADMIN", "20 per minute")
+RATE_LIMIT_STORAGE_URI = os.getenv("RATE_LIMIT_STORAGE_URI", "memory://")
+
+# Legacy rate limit settings (kept for backward compatibility)
 API_RATE_LIMIT_PER_MINUTE = int(os.getenv("API_RATE_LIMIT_PER_MINUTE", 60))
 API_RATE_LIMIT_BURST = int(os.getenv("API_RATE_LIMIT_BURST", 10))
 
@@ -138,6 +146,7 @@ MAX_BACKUP_FILES = int(os.getenv("MAX_BACKUP_FILES", 7))
 # =============================================================================
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 SUPABASE_SYNC_ENABLED = os.getenv("SUPABASE_SYNC_ENABLED", "false").lower() == "true"
 

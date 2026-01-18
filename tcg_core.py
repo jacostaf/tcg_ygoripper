@@ -183,24 +183,37 @@ class PersistentCache:
         with self._lock:
             self.cards[group_id] = cards
             # Update global index and product_id index
+            # Use set for O(1) duplicate detection instead of O(n) list search
             for card in cards:
                 if card.name not in self.global_index:
                     self.global_index[card.name] = []
-                # Avoid duplicates
-                if card not in self.global_index[card.name]:
+                # Use product_id for deduplication (O(1) lookup)
+                # Only add if not already indexed by this product_id
+                existing_ids = {c.product_id for c in self.global_index[card.name]}
+                if card.product_id not in existing_ids:
                     self.global_index[card.name].append(card)
                 # Build product_id index for O(1) lookup
                 if card.product_id:
                     self.product_id_index[card.product_id] = card
             self.save_to_disk()
 
-    def search_global_index(self, query: str) -> List[Card]:
+    def search_global_index(self, query: str, limit: int = 100) -> List[Card]:
+        """
+        Search global index with optional result limit for performance.
+
+        Args:
+            query: Search query string
+            limit: Maximum results to return (default 100, 0 for unlimited)
+        """
         query_lower = query.lower()
         results = []
         with self._lock:
             for name, cards in self.global_index.items():
                 if query_lower in name.lower():
                     results.extend(cards)
+                    # Early termination when limit reached
+                    if limit > 0 and len(results) >= limit:
+                        return results[:limit]
         return results
 
     # =========================================================================

@@ -19,6 +19,7 @@ waitress>=2.1.2,<3.0.0  # Production WSGI server
 # Web Framework
 flask>=2.3.3,<4.0.0
 flask-cors>=4.0.0,<5.0.0  # For handling CORS in the API
+flask-limiter>=3.5.0,<4.0.0  # Rate limiting for API protection
 
 # Database
 pymongo[srv]>=4.6.0,<5.0.0  # MongoDB driver with SRV support

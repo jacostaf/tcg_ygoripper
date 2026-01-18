@@ -15,9 +15,15 @@ from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, Blueprint, jsonify, request
 from flask_cors import CORS
 
+from functools import wraps
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from tcgcsv_config import (
-    PORT, DEBUG, LOG_LEVEL, get_cors_origins, 
-    ENABLE_DEBUG_ENDPOINTS, validate_config
+    PORT, DEBUG, LOG_LEVEL, get_cors_origins,
+    ENABLE_DEBUG_ENDPOINTS, validate_config,
+    SUPABASE_URL, SUPABASE_ANON_KEY,
+    RATE_LIMIT_DEFAULT, RATE_LIMIT_SEARCH, RATE_LIMIT_BULK,
+    RATE_LIMIT_ADMIN, RATE_LIMIT_STORAGE_URI
 )
 
 # Configure logging
@@ -52,6 +58,25 @@ CORS(app,
      allow_headers=['Content-Type', 'Accept', 'Origin', 'Authorization'],
      expose_headers=['Content-Type', 'Content-Length'])
 
+# Rate limiter configuration
+limiter = Limiter(
+    key_func=get_remote_address,
+    app=app,
+    default_limits=[RATE_LIMIT_DEFAULT],
+    storage_uri=RATE_LIMIT_STORAGE_URI,
+    strategy="fixed-window",
+    headers_enabled=True  # Adds X-RateLimit headers to responses
+)
+
+# Custom error handler for rate limit exceeded
+@app.errorhandler(429)
+def rate_limit_exceeded(e):
+    return jsonify({
+        "success": False,
+        "error": "Rate limit exceeded. Please slow down your requests.",
+        "retry_after": e.description
+    }), 429
+
 # Thread pool for async operations
 executor = ThreadPoolExecutor(max_workers=4)
 
@@ -60,6 +85,62 @@ from tcg_core import (
     cache, CardSet, Card, fetch_card_sets, fetch_cards_for_set,
     get_effective_set_code
 )
+import re
+
+# Pre-compiled regex for card name cleaning - avoids recompilation on each request
+_RARITY_SUFFIX_PATTERN = re.compile(r'\s*\([^)]*\)\s*$')
+
+def clean_card_name(name: str) -> str:
+    """
+    Clean card name by removing rarity suffix in parentheses.
+    TCGcsv names often include rarity like "Card Name (Quarter Century Secret Rare)"
+    """
+    if not name:
+        return name
+    return _RARITY_SUFFIX_PATTERN.sub('', name).strip().lower()
+
+
+def get_set_lookup_maps():
+    """
+    Build lookup maps for sets - O(1) lookups instead of O(n) iteration.
+    Returns (by_set_code, by_group_id, by_name) dicts.
+    Uses get_effective_set_code() to include YGOProDeck fallback codes.
+    """
+    sets = cache.get_sets()
+    if not sets:
+        sets = fetch_card_sets()
+        cache.update_sets(sets)
+
+    by_set_code = {}
+    by_group_id = {}
+    by_name = {}
+
+    for card_set in sets:
+        # Use effective set code (includes YGOProDeck fallback)
+        effective_code = get_effective_set_code(card_set)
+        if effective_code:
+            by_set_code[effective_code.upper()] = card_set
+        by_group_id[str(card_set.group_id)] = card_set
+        by_name[card_set.name.upper()] = card_set
+
+    return sets, by_set_code, by_group_id, by_name
+
+
+def find_set_by_identifier(set_identifier: str):
+    """
+    Find a set by set_code (incl. YGOProDeck fallback), group_id, or name with O(1) lookups.
+    Returns (CardSet, sets_list) or (None, sets_list).
+    """
+    sets, by_set_code, by_gid, by_name = get_set_lookup_maps()
+
+    upper_id = set_identifier.upper()
+    target_set = (
+        by_set_code.get(upper_id) or
+        by_gid.get(set_identifier) or
+        by_name.get(upper_id)
+    )
+
+    return target_set, sets
 
 def initialize_global_index():
     """Background task to load all cards into the global index."""
@@ -230,21 +311,9 @@ def get_card_sets():
 def get_set_cards(set_identifier: str):
     """Get all cards for a specific set."""
     try:
-        # Find the set
-        sets = cache.get_sets()
-        if not sets:
-            sets = fetch_card_sets()
-            cache.update_sets(sets)
-        
-        target_set = None
-        for card_set in sets:
-            # Try matching by abbreviation, group_id, or full set name
-            if (card_set.abbreviation and card_set.abbreviation.upper() == set_identifier.upper()) or \
-               str(card_set.group_id) == set_identifier or \
-               card_set.name.upper() == set_identifier.upper():
-                target_set = card_set
-                break
-        
+        # Find the set using O(1) lookup maps
+        target_set, _ = find_set_by_identifier(set_identifier)
+
         if not target_set:
             return create_error_response(f"Set '{set_identifier}' not found", 404, "not_found")
         
@@ -294,6 +363,7 @@ def get_set_cards(set_identifier: str):
         return create_error_response(f"Failed to retrieve cards for set: {str(e)}")
 
 @api_v1.route('/card-sets/search/<query>', methods=['GET'])
+@limiter.limit(RATE_LIMIT_SEARCH)
 def search_card_sets(query: str):
     """Search card sets by name."""
     try:
@@ -334,31 +404,25 @@ def search_card_sets(query: str):
 # =============================================================================
 
 @api_v1.route('/cards/search', methods=['GET'])
+@limiter.limit(RATE_LIMIT_SEARCH)
 def search_cards():
     """Enhanced card search by name, card number, or other criteria."""
     try:
         query = request.args.get('q', '').strip()
         set_filter = request.args.get('set', '').strip()
         search_type = request.args.get('type', 'name').lower()  # name, number, or all
-        
+
         if not query:
             return create_error_response("Query parameter 'q' is required", 400, "bad_request")
-        
-        # Find target set if specified
+
+        # Find target set if specified using O(1) lookup
         target_group_id = None
         target_set_code = None
         if set_filter:
-            sets = cache.get_sets()
-            if not sets:
-                sets = fetch_card_sets()
-                cache.update_sets(sets)
-            
-            for card_set in sets:
-                if (card_set.abbreviation and card_set.abbreviation.upper() == set_filter.upper()) or \
-                   str(card_set.group_id) == set_filter:
-                    target_group_id = card_set.group_id
-                    target_set_code = get_effective_set_code(card_set)
-                    break
+            target_set, _ = find_set_by_identifier(set_filter)
+            if target_set:
+                target_group_id = target_set.group_id
+                target_set_code = get_effective_set_code(target_set)
         
         # Search for cards
         matching_cards = []
@@ -439,6 +503,7 @@ def search_cards():
         return create_error_response(f"Failed to search cards: {str(e)}")
 
 @api_v1.route('/cards/bulk-search', methods=['POST'])
+@limiter.limit(RATE_LIMIT_BULK)
 def bulk_card_search():
     """Search for multiple cards at once."""
     try:
@@ -455,45 +520,39 @@ def bulk_card_search():
         
         if len(queries) > 20:
             return create_error_response("Maximum 20 queries allowed", 400, "bad_request")
-        
+
         results = {}
-        
+
+        # Find target set ONCE before the loop (was being done per query - O(n*m) -> O(n))
+        target_group_id = None
+        target_set_code = None
+        target_set_cards = None
+        if set_filter:
+            target_set, _ = find_set_by_identifier(set_filter)
+            if target_set:
+                target_group_id = target_set.group_id
+                target_set_code = get_effective_set_code(target_set)
+                # Pre-fetch cards for the set once
+                target_set_cards = cache.get_cards(target_group_id)
+                if not target_set_cards:
+                    target_set_cards = fetch_cards_for_set(target_group_id)
+                    cache.update_cards(target_group_id, target_set_cards)
+
         for query in queries:
             if not query or not isinstance(query, str):
                 continue
-                
+
             query = query.strip()
             if not query:
                 continue
-            
+
             # Reuse the search logic
             matching_cards = []
             query_lower = query.lower()
-            
-            # Find target set if specified
-            target_group_id = None
-            target_set_code = None
-            if set_filter:
-                sets = cache.get_sets()
-                if not sets:
-                    sets = fetch_card_sets()
-                    cache.update_sets(sets)
-                
-                for card_set in sets:
-                    if (card_set.abbreviation and card_set.abbreviation.upper() == set_filter.upper()) or \
-                       str(card_set.group_id) == set_filter:
-                        target_group_id = card_set.group_id
-                        target_set_code = get_effective_set_code(card_set)
-                        break
-            
-            if target_group_id:
-                # Search in specific set
-                cards = cache.get_cards(target_group_id)
-                if not cards:
-                    cards = fetch_cards_for_set(target_group_id)
-                    cache.update_cards(target_group_id, cards)
-                
-                for card in cards:
+
+            if target_group_id and target_set_cards:
+                # Search in pre-fetched set cards (no re-fetch needed)
+                for card in target_set_cards:
                     if search_type == 'number':
                         if card.ext_number and query_lower in card.ext_number.lower():
                             matching_cards.append((card, target_set_code))
@@ -676,31 +735,18 @@ def get_card_price():
                 potential_set_code = card_number.split('-')[0]
                 set_code = potential_set_code
 
-        # Find set if provided
+        # Find set if provided using O(1) lookup
         target_group_id = None
         if set_code:
-            sets = cache.get_sets()
-            if not sets:
-                sets = fetch_card_sets()
-                cache.update_sets(sets)
-
-            for card_set in sets:
-                if card_set.abbreviation and card_set.abbreviation.upper() == set_code.upper():
-                    target_group_id = card_set.group_id
-                    break
-
+            target_set, _ = find_set_by_identifier(set_code)
+            if target_set:
+                target_group_id = target_set.group_id
             logger.info(f"Set search: code='{set_code}', group_id={target_group_id}")
         
         # Search for card with rarity consideration
         found_card = None
 
-        # Helper to clean card names (remove rarity suffix in parentheses)
-        # TCGcsv names often include rarity like "Card Name (Quarter Century Secret Rare)"
-        def clean_card_name(name):
-            if not name:
-                return name
-            import re
-            return re.sub(r'\s*\([^)]*\)\s*$', '', name).strip().lower()
+        # Note: clean_card_name is now defined at module level for performance
 
         if target_group_id:
             # Search in specific set
@@ -839,6 +885,8 @@ def get_cache_stats():
         return create_error_response(f"Failed to get cache stats: {str(e)}")
 
 @api_v1.route('/cache/refresh', methods=['POST'])
+@limiter.limit(RATE_LIMIT_ADMIN)
+@require_admin_auth
 def refresh_cache():
     """Force refresh the cache."""
     try:
@@ -856,6 +904,78 @@ def refresh_cache():
 # ... (existing debug endpoints if any)
 
 # =============================================================================
+# ADMIN AUTHENTICATION
+# =============================================================================
+
+def require_admin_auth(f):
+    """
+    Decorator that validates Supabase JWT and checks if user is an admin.
+    Requires valid Authorization: Bearer <token> header.
+    User must have is_admin=true in their profiles table.
+    """
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # Check for Authorization header
+        auth_header = request.headers.get('Authorization')
+        if not auth_header:
+            return jsonify({"success": False, "error": "Missing authorization header"}), 401
+
+        if not auth_header.startswith('Bearer '):
+            return jsonify({"success": False, "error": "Invalid authorization format. Use: Bearer <token>"}), 401
+
+        token = auth_header[7:]  # Remove "Bearer " prefix
+
+        # Check if Supabase is configured
+        if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+            logger.error("Supabase not configured - admin endpoints disabled")
+            return jsonify({"success": False, "error": "Admin authentication not configured"}), 503
+
+        try:
+            # Validate JWT by calling Supabase to get user's profile
+            # The JWT token is used to authenticate, and RLS ensures we only get our own profile
+            response = requests.get(
+                f"{SUPABASE_URL}/rest/v1/profiles?select=is_admin",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "apikey": SUPABASE_ANON_KEY,
+                    "Content-Type": "application/json"
+                },
+                timeout=10
+            )
+
+            if response.status_code == 401:
+                return jsonify({"success": False, "error": "Invalid or expired token"}), 401
+
+            if response.status_code != 200:
+                logger.error(f"Supabase auth check failed: {response.status_code} - {response.text}")
+                return jsonify({"success": False, "error": "Authentication failed"}), 401
+
+            profiles = response.json()
+
+            # Check if we got a profile and if user is admin
+            if not profiles or len(profiles) == 0:
+                return jsonify({"success": False, "error": "User profile not found"}), 403
+
+            if not profiles[0].get('is_admin', False):
+                logger.warning(f"Non-admin user attempted to access admin endpoint")
+                return jsonify({"success": False, "error": "Admin access required"}), 403
+
+            # User is authenticated and is an admin
+            return f(*args, **kwargs)
+
+        except requests.exceptions.Timeout:
+            logger.error("Supabase auth check timed out")
+            return jsonify({"success": False, "error": "Authentication service timeout"}), 503
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Supabase auth check failed: {e}")
+            return jsonify({"success": False, "error": "Authentication service unavailable"}), 503
+        except Exception as e:
+            logger.error(f"Unexpected error in admin auth: {e}")
+            return jsonify({"success": False, "error": "Authentication error"}), 500
+
+    return decorated_function
+
+# =============================================================================
 # ADMIN ENDPOINTS
 # =============================================================================
 
@@ -863,6 +983,8 @@ from supabase_sync import syncer, get_progress
 from tcg_core import cache as tcg_cache
 
 @api_v1.route('/admin/refresh-catalog', methods=['POST'])
+@limiter.limit(RATE_LIMIT_ADMIN)
+@require_admin_auth
 def admin_refresh_catalog():
     """Refresh the card catalog from TCGcsv (fetches all sets and cards)."""
     try:
@@ -883,6 +1005,8 @@ def admin_refresh_catalog():
         return create_error_response(f"Failed to start catalog refresh: {str(e)}")
 
 @api_v1.route('/admin/catalog-status', methods=['GET'])
+@limiter.limit(RATE_LIMIT_ADMIN)
+@require_admin_auth
 def admin_catalog_status():
     """Get current catalog cache status."""
     try:
@@ -896,6 +1020,8 @@ def admin_catalog_status():
         return create_error_response(f"Failed to get catalog status: {str(e)}")
 
 @api_v1.route('/admin/sync-prices', methods=['POST'])
+@limiter.limit(RATE_LIMIT_ADMIN)
+@require_admin_auth
 def admin_sync_prices():
     """Trigger manual price sync to Supabase (uploads local cache to DB)."""
     try:
@@ -909,11 +1035,15 @@ def admin_sync_prices():
         return create_error_response(f"Failed to start sync: {str(e)}")
 
 @api_v1.route('/admin/sync-progress', methods=['GET'])
+@limiter.limit(RATE_LIMIT_ADMIN)
+@require_admin_auth
 def admin_sync_progress():
     """Get current sync progress."""
     return create_success_response(get_progress())
 
 @api_v1.route('/admin/refresh-leaderboards', methods=['POST'])
+@limiter.limit(RATE_LIMIT_ADMIN)
+@require_admin_auth
 def admin_refresh_leaderboards():
     """Trigger manual leaderboard refresh."""
     try:
@@ -941,6 +1071,8 @@ def admin_refresh_leaderboards():
         return create_error_response(f"Failed to refresh leaderboards: {str(e)}")
 
 @api_v1.route('/admin/force-refresh-leaderboards', methods=['POST'])
+@limiter.limit(RATE_LIMIT_ADMIN)
+@require_admin_auth
 def admin_force_refresh_leaderboards():
     """Force refresh leaderboard materialized views (uses simpler non-concurrent refresh)."""
     try:
@@ -959,6 +1091,8 @@ def admin_force_refresh_leaderboards():
         return create_error_response(f"Failed to force refresh: {str(e)}")
 
 @api_v1.route('/admin/leaderboard-debug', methods=['GET'])
+@limiter.limit(RATE_LIMIT_ADMIN)
+@require_admin_auth
 def admin_leaderboard_debug():
     """Debug endpoint to check leaderboard state."""
     try:

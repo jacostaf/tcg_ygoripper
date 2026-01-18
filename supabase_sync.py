@@ -69,6 +69,8 @@ class SupabaseSync:
         self.rarity_map = {}
         self.set_map = {}
         self.variant_map = {}
+        # Thread-safe lock for shared state
+        self._state_lock = threading.Lock()
 
     def _request(self, method: str, endpoint: str, data: Any = None, params: Any = None, upsert: bool = False) -> Any:
         if not self.url or not self.key:
@@ -243,8 +245,115 @@ class SupabaseSync:
 
         return all_variants
 
+    def _categorize_variant(self, card, card_set, set_id, rarity_id, slug, existing_by_product_id, existing_by_slug):
+        """
+        Categorize a variant for batch processing - determines what operation is needed.
+        Returns (category, variant_data) where category is 'insert', 'update', 'merge', or 'skip'.
+        """
+        existing_by_pid = existing_by_product_id.get(card.product_id) if card.product_id else None
+        existing_by_sl = existing_by_slug.get(slug)
+
+        variant_data = {
+            "card": card,
+            "set_id": set_id,
+            "rarity_id": rarity_id,
+            "slug": slug,
+            "existing_by_pid": existing_by_pid,
+            "existing_by_sl": existing_by_sl
+        }
+
+        if existing_by_pid and existing_by_sl:
+            if existing_by_pid["id"] == existing_by_sl["id"]:
+                return "update", variant_data
+            else:
+                return "merge", variant_data
+        elif existing_by_pid:
+            return "update", variant_data
+        elif existing_by_sl:
+            return "update", variant_data
+        else:
+            return "insert", variant_data
+
+    def _batch_insert_variants(self, inserts):
+        """Batch insert new variants."""
+        if not inserts:
+            return {}
+
+        batch_data = []
+        for data in inserts:
+            card = data["card"]
+            batch_data.append({
+                "set_id": data["set_id"],
+                "rarity_id": data["rarity_id"],
+                "card_name": card.name,
+                "card_number": card.ext_number,
+                "card_slug": data["slug"],
+                "tcgcsv_product_id": card.product_id
+            })
+
+        # Insert in batches of 100
+        results = {}
+        batch_size = 100
+        for i in range(0, len(batch_data), batch_size):
+            batch = batch_data[i:i+batch_size]
+            res = self._request("POST", "card_variants", data=batch,
+                               params={"on_conflict": "card_slug"}, upsert=True)
+            if res:
+                for r in res:
+                    if r.get("tcgcsv_product_id"):
+                        results[r["tcgcsv_product_id"]] = r["id"]
+                    elif r.get("card_slug"):
+                        results[r["card_slug"]] = r["id"]
+
+        return results
+
+    def _batch_update_variants(self, updates):
+        """
+        Batch update existing variants using upsert on card_slug.
+        This is more efficient than individual PATCH calls.
+        """
+        if not updates:
+            return {}
+
+        batch_data = []
+        for data in updates:
+            card = data["card"]
+            existing_id = None
+            if data["existing_by_pid"]:
+                existing_id = data["existing_by_pid"]["id"]
+            elif data["existing_by_sl"]:
+                existing_id = data["existing_by_sl"]["id"]
+
+            if existing_id:
+                batch_data.append({
+                    "id": existing_id,
+                    "set_id": data["set_id"],
+                    "rarity_id": data["rarity_id"],
+                    "card_name": card.name,
+                    "card_number": card.ext_number,
+                    "card_slug": data["slug"],
+                    "tcgcsv_product_id": card.product_id
+                })
+
+        results = {}
+        batch_size = 100
+        for i in range(0, len(batch_data), batch_size):
+            batch = batch_data[i:i+batch_size]
+            # Use upsert with id as conflict target
+            res = self._request("POST", "card_variants", data=batch,
+                               params={"on_conflict": "id"}, upsert=True)
+            if res:
+                for r in res:
+                    if r.get("tcgcsv_product_id"):
+                        results[r["tcgcsv_product_id"]] = r["id"]
+                    elif r.get("card_slug"):
+                        results[r["card_slug"]] = r["id"]
+
+        return results
+
     def _process_single_variant(self, card, card_set, set_id, rarity_id, slug, existing_by_product_id, existing_by_slug):
-        """Process a single variant - returns (variant_id, action, price_entry)."""
+        """Process a single variant - returns (variant_id, action, price_entry).
+        NOTE: This is kept for backward compatibility but batched methods are preferred."""
         variant_id = None
         action = None  # 'updated', 'inserted', 'merged', 'skipped'
 
@@ -327,7 +436,14 @@ class SupabaseSync:
             return None, "error", None
 
     def sync_variants_and_prices(self):
-        """Sync card variants and prices with parallel processing."""
+        """
+        Sync card variants and prices using batched operations for performance.
+
+        This optimized version:
+        1. Categorizes all variants first (CPU-bound, fast)
+        2. Batches inserts and updates (reduces API calls from N to N/100)
+        3. Batches price updates
+        """
         logger.info("Syncing variants and prices...")
         update_progress(phase="variants", current=0)
 
@@ -364,72 +480,112 @@ class SupabaseSync:
                 cards_to_process.append((card, card_set, set_id, rarity_id, slug))
 
         total_cards = len(cards_to_process)
-        update_progress(total=total_cards, message=f"Processing {total_cards} cards...")
-        logger.info(f"Processing {total_cards} cards with parallel execution...")
+        update_progress(total=total_cards, message=f"Categorizing {total_cards} cards...")
+        logger.info(f"Categorizing {total_cards} cards...")
 
-        # Process with parallel threads
-        prices_batch = []
+        # Phase 1: Categorize all variants (fast, CPU-bound)
+        inserts = []
+        updates = []
+        merges = []
         stats = {"updated": 0, "inserted": 0, "merged": 0, "skipped": 0, "errors": 0}
-        processed = 0
-        batch_size = 200  # Price batch size
 
-        # Use ThreadPoolExecutor for parallel variant processing
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = []
+        for card, card_set, set_id, rarity_id, slug in cards_to_process:
+            category, variant_data = self._categorize_variant(
+                card, card_set, set_id, rarity_id, slug,
+                existing_by_product_id, existing_by_slug
+            )
+            if category == "insert":
+                inserts.append(variant_data)
+            elif category == "update":
+                updates.append(variant_data)
+            elif category == "merge":
+                merges.append(variant_data)
+            # "skip" is not explicitly returned but handled
 
-            for card, card_set, set_id, rarity_id, slug in cards_to_process:
-                future = executor.submit(
-                    self._process_single_variant,
-                    card, card_set, set_id, rarity_id, slug,
-                    existing_by_product_id, existing_by_slug
-                )
-                futures.append(future)
+        logger.info(f"Categorization complete: {len(inserts)} inserts, {len(updates)} updates, {len(merges)} merges")
+        update_progress(message=f"Inserts: {len(inserts)}, Updates: {len(updates)}, Merges: {len(merges)}")
 
-            for future in as_completed(futures):
-                variant_id, action, price_entry = future.result()
-                processed += 1
+        # Phase 2: Batch insert new variants
+        update_progress(message=f"Inserting {len(inserts)} new variants...")
+        insert_results = self._batch_insert_variants(inserts)
+        stats["inserted"] = len(insert_results)
+        logger.info(f"Inserted {len(insert_results)} variants")
 
-                if action == "updated":
-                    stats["updated"] += 1
-                elif action == "inserted":
-                    stats["inserted"] += 1
-                elif action == "merged":
-                    stats["merged"] += 1
-                elif action == "error":
+        # Phase 3: Batch update existing variants
+        update_progress(message=f"Updating {len(updates)} existing variants...")
+        update_results = self._batch_update_variants(updates)
+        stats["updated"] = len(update_results)
+        logger.info(f"Updated {len(update_results)} variants")
+
+        # Phase 4: Handle merges individually (complex operation, typically few items)
+        if merges:
+            update_progress(message=f"Processing {len(merges)} merge cases...")
+            for data in merges:
+                card = data["card"]
+                old_id = data["existing_by_pid"]["id"]
+                new_id = data["existing_by_sl"]["id"]
+                try:
+                    self._request("DELETE", "card_variants", params={"id": f"eq.{old_id}"})
+                    res = self._request("PATCH", "card_variants",
+                                      data={"set_id": data["set_id"], "rarity_id": data["rarity_id"],
+                                            "card_name": card.name, "card_number": card.ext_number,
+                                            "tcgcsv_product_id": card.product_id},
+                                      params={"id": f"eq.{new_id}"})
+                    if res:
+                        stats["merged"] += 1
+                except Exception as e:
+                    logger.error(f"Merge failed for {data['slug']}: {e}")
                     stats["errors"] += 1
-                else:
-                    stats["skipped"] += 1
 
-                if price_entry:
-                    prices_batch.append(price_entry)
+        # Phase 5: Collect variant IDs and build price entries
+        update_progress(message="Building price entries...")
 
-                # Update progress every 100 cards
-                if processed % 100 == 0:
-                    update_progress(
-                        current=processed,
-                        message=f"Processed {processed}/{total_cards} cards",
-                        stats=stats
-                    )
-                    logger.info(f"Processed {processed}/{total_cards} (u={stats['updated']}, i={stats['inserted']}, m={stats['merged']})")
+        # Combine all results to get variant IDs
+        all_variant_ids = {}
+        all_variant_ids.update(insert_results)
+        all_variant_ids.update(update_results)
 
-                # Flush prices batch
-                if len(prices_batch) >= batch_size:
-                    # Deduplicate by (card_variant_id, price_date, source) to avoid "cannot affect row a second time"
-                    deduped = {(p["card_variant_id"], p["price_date"], p["source"]): p for p in prices_batch}
-                    self._request("POST", "card_prices", data=list(deduped.values()),
-                                 params={"on_conflict": "card_variant_id,price_date,source"},
-                                 upsert=True)
-                    prices_batch = []
+        # Also include existing variants that didn't need updates
+        for v in existing:
+            if v.get("tcgcsv_product_id") and v["tcgcsv_product_id"] not in all_variant_ids:
+                all_variant_ids[v["tcgcsv_product_id"]] = v["id"]
 
-        # Flush remaining prices
-        if prices_batch:
+        # Build price entries
+        prices_batch = []
+        now = datetime.now().isoformat()[:10]
+
+        for card, card_set, set_id, rarity_id, slug in cards_to_process:
+            variant_id = all_variant_ids.get(card.product_id) or all_variant_ids.get(slug)
+            if variant_id:
+                base_price = card.market_price or card.mid_price or card.low_price or 0
+                prices_batch.append({
+                    "card_variant_id": variant_id,
+                    "price": base_price,
+                    "price_market": card.market_price,
+                    "price_low": card.low_price,
+                    "price_mid": card.mid_price,
+                    "price_high": card.high_price,
+                    "source": "tcgplayer",
+                    "currency": "USD",
+                    "price_date": now
+                })
+
+        # Phase 6: Batch upsert prices
+        update_progress(message=f"Syncing {len(prices_batch)} prices...")
+        logger.info(f"Syncing {len(prices_batch)} prices in batches...")
+
+        price_batch_size = 500  # Larger batch for prices
+        for i in range(0, len(prices_batch), price_batch_size):
+            batch = prices_batch[i:i+price_batch_size]
             # Deduplicate by (card_variant_id, price_date, source)
-            deduped = {(p["card_variant_id"], p["price_date"], p["source"]): p for p in prices_batch}
+            deduped = {(p["card_variant_id"], p["price_date"], p["source"]): p for p in batch}
             self._request("POST", "card_prices", data=list(deduped.values()),
                          params={"on_conflict": "card_variant_id,price_date,source"},
                          upsert=True)
+            if (i + price_batch_size) % 2000 == 0:
+                logger.info(f"Synced {min(i + price_batch_size, len(prices_batch))}/{len(prices_batch)} prices")
 
-        update_progress(current=processed, stats=stats, message="Variants sync complete")
+        update_progress(current=total_cards, stats=stats, message="Variants sync complete")
         logger.info(f"Variants sync complete: {stats}")
 
     def run_sync(self):
