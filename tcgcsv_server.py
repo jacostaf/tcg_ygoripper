@@ -21,7 +21,7 @@ from flask_limiter.util import get_remote_address
 from tcgcsv_config import (
     PORT, DEBUG, LOG_LEVEL, get_cors_origins,
     ENABLE_DEBUG_ENDPOINTS, validate_config,
-    SUPABASE_URL, SUPABASE_ANON_KEY,
+    SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_KEY,
     RATE_LIMIT_DEFAULT, RATE_LIMIT_SEARCH, RATE_LIMIT_BULK,
     RATE_LIMIT_ADMIN, RATE_LIMIT_STORAGE_URI
 )
@@ -76,6 +76,79 @@ def rate_limit_exceeded(e):
         "error": "Rate limit exceeded. Please slow down your requests.",
         "retry_after": e.description
     }), 429
+
+# =============================================================================
+# ADMIN AUTHENTICATION
+# =============================================================================
+
+def require_admin_auth(f):
+    """
+    Decorator that validates Supabase JWT and checks if user is an admin.
+    Requires valid Authorization: Bearer <token> header.
+    User must have is_admin=true in their user_profiles table.
+    """
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # Check for Authorization header
+        auth_header = request.headers.get('Authorization')
+        if not auth_header:
+            return jsonify({"success": False, "error": "Missing authorization header"}), 401
+
+        if not auth_header.startswith('Bearer '):
+            return jsonify({"success": False, "error": "Invalid authorization format. Use: Bearer <token>"}), 401
+
+        token = auth_header[7:]  # Remove "Bearer " prefix
+
+        # Check if Supabase is configured (use anon key, fallback to service key)
+        api_key = SUPABASE_ANON_KEY or SUPABASE_SERVICE_KEY
+        if not SUPABASE_URL or not api_key:
+            logger.error("Supabase not configured - admin endpoints disabled")
+            return jsonify({"success": False, "error": "Admin authentication not configured"}), 503
+
+        try:
+            # Validate JWT by calling Supabase to get user's profile
+            # The JWT token is used to authenticate, and RLS ensures we only get our own profile
+            response = requests.get(
+                f"{SUPABASE_URL}/rest/v1/user_profiles?select=is_admin",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "apikey": api_key,
+                    "Content-Type": "application/json"
+                },
+                timeout=10
+            )
+
+            if response.status_code == 401:
+                return jsonify({"success": False, "error": "Invalid or expired token"}), 401
+
+            if response.status_code != 200:
+                logger.error(f"Supabase auth check failed: {response.status_code} - {response.text}")
+                return jsonify({"success": False, "error": f"Authentication failed: {response.status_code}"}), 401
+
+            profiles = response.json()
+
+            # Check if we got a profile and if user is admin
+            if not profiles or len(profiles) == 0:
+                return jsonify({"success": False, "error": "User profile not found"}), 403
+
+            if not profiles[0].get('is_admin', False):
+                logger.warning(f"Non-admin user attempted to access admin endpoint")
+                return jsonify({"success": False, "error": "Admin access required"}), 403
+
+            # User is authenticated and is an admin
+            return f(*args, **kwargs)
+
+        except requests.exceptions.Timeout:
+            logger.error("Supabase auth check timed out")
+            return jsonify({"success": False, "error": "Authentication service timeout"}), 503
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Supabase auth check failed: {e}")
+            return jsonify({"success": False, "error": "Authentication service unavailable"}), 503
+        except Exception as e:
+            logger.error(f"Unexpected error in admin auth: {e}")
+            return jsonify({"success": False, "error": "Authentication error"}), 500
+
+    return decorated_function
 
 # Thread pool for async operations
 executor = ThreadPoolExecutor(max_workers=4)
@@ -902,78 +975,6 @@ def refresh_cache():
 # =============================================================================
 
 # ... (existing debug endpoints if any)
-
-# =============================================================================
-# ADMIN AUTHENTICATION
-# =============================================================================
-
-def require_admin_auth(f):
-    """
-    Decorator that validates Supabase JWT and checks if user is an admin.
-    Requires valid Authorization: Bearer <token> header.
-    User must have is_admin=true in their profiles table.
-    """
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        # Check for Authorization header
-        auth_header = request.headers.get('Authorization')
-        if not auth_header:
-            return jsonify({"success": False, "error": "Missing authorization header"}), 401
-
-        if not auth_header.startswith('Bearer '):
-            return jsonify({"success": False, "error": "Invalid authorization format. Use: Bearer <token>"}), 401
-
-        token = auth_header[7:]  # Remove "Bearer " prefix
-
-        # Check if Supabase is configured
-        if not SUPABASE_URL or not SUPABASE_ANON_KEY:
-            logger.error("Supabase not configured - admin endpoints disabled")
-            return jsonify({"success": False, "error": "Admin authentication not configured"}), 503
-
-        try:
-            # Validate JWT by calling Supabase to get user's profile
-            # The JWT token is used to authenticate, and RLS ensures we only get our own profile
-            response = requests.get(
-                f"{SUPABASE_URL}/rest/v1/profiles?select=is_admin",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "apikey": SUPABASE_ANON_KEY,
-                    "Content-Type": "application/json"
-                },
-                timeout=10
-            )
-
-            if response.status_code == 401:
-                return jsonify({"success": False, "error": "Invalid or expired token"}), 401
-
-            if response.status_code != 200:
-                logger.error(f"Supabase auth check failed: {response.status_code} - {response.text}")
-                return jsonify({"success": False, "error": "Authentication failed"}), 401
-
-            profiles = response.json()
-
-            # Check if we got a profile and if user is admin
-            if not profiles or len(profiles) == 0:
-                return jsonify({"success": False, "error": "User profile not found"}), 403
-
-            if not profiles[0].get('is_admin', False):
-                logger.warning(f"Non-admin user attempted to access admin endpoint")
-                return jsonify({"success": False, "error": "Admin access required"}), 403
-
-            # User is authenticated and is an admin
-            return f(*args, **kwargs)
-
-        except requests.exceptions.Timeout:
-            logger.error("Supabase auth check timed out")
-            return jsonify({"success": False, "error": "Authentication service timeout"}), 503
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Supabase auth check failed: {e}")
-            return jsonify({"success": False, "error": "Authentication service unavailable"}), 503
-        except Exception as e:
-            logger.error(f"Unexpected error in admin auth: {e}")
-            return jsonify({"success": False, "error": "Authentication error"}), 500
-
-    return decorated_function
 
 # =============================================================================
 # ADMIN ENDPOINTS

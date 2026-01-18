@@ -8,8 +8,20 @@ import json
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv('.env.development')
+# =============================================================================
+# ENVIRONMENT LOADING
+# =============================================================================
+# Determine environment from ENV var (set before import) or default to development
+# On Render, env vars are injected directly - no .env file needed
+_environment = os.getenv("ENVIRONMENT", "development")
+
+# Try to load environment-specific .env file (optional - falls back to env vars)
+_env_file = f'.env.{_environment}'
+if os.path.exists(_env_file):
+    load_dotenv(_env_file)
+elif os.path.exists('.env'):
+    load_dotenv('.env')
+# If no .env files exist (e.g., on Render), env vars are already set by the platform
 
 # =============================================================================
 # CORE APPLICATION SETTINGS
