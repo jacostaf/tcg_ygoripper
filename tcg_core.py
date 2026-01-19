@@ -121,6 +121,8 @@ class PersistentCache:
     """Thread-safe cache with disk persistence."""
     def __init__(self):
         self._lock = threading.RLock()
+        self._refresh_lock = threading.Lock()  # Prevents concurrent refreshes
+        self._is_refreshing = False
         self.card_sets: List[CardSet] = []
         self.set_map: Dict[int, CardSet] = {}
         self.cards: Dict[int, List[Card]] = {}
@@ -307,26 +309,57 @@ class PersistentCache:
                 except Exception as e:
                     logger.error(f"Failed to delete cache file: {e}")
 
-    def refresh(self):
-        """Force refresh the entire cache."""
-        logger.info("Refreshing cache...")
-        self.clear()
-        
-        # Fetch sets
-        sets = fetch_card_sets()
-        self.update_sets(sets)
-        
-        # Fetch cards for all sets
-        total_sets = len(sets)
-        logger.info(f"Found {total_sets} sets. Fetching cards...")
-        
-        for i, card_set in enumerate(sets):
-            cards = fetch_cards_for_set(card_set.group_id)
-            self.update_cards(card_set.group_id, cards)
-            if (i + 1) % 10 == 0:
-                logger.info(f"Refreshed {i + 1}/{total_sets} sets")
-                
-        logger.info("Cache refresh complete.")
+    def refresh(self, force: bool = False) -> bool:
+        """
+        Force refresh the entire cache.
+
+        Args:
+            force: If True, block and wait even if another refresh is in progress.
+                   If False (default), return immediately if refresh is in progress.
+
+        Returns:
+            True if refresh completed, False if skipped due to concurrent refresh.
+        """
+        # Try to acquire refresh lock (non-blocking unless force=True)
+        acquired = self._refresh_lock.acquire(blocking=force)
+
+        if not acquired:
+            logger.info("Refresh already in progress, skipping")
+            return False
+
+        try:
+            self._is_refreshing = True
+            logger.info("Refreshing cache...")
+            self.clear()
+
+            # Fetch sets
+            sets = fetch_card_sets()
+            self.update_sets(sets)
+
+            # Fetch cards for all sets
+            total_sets = len(sets)
+            logger.info(f"Found {total_sets} sets. Fetching cards...")
+
+            for i, card_set in enumerate(sets):
+                cards = fetch_cards_for_set(card_set.group_id)
+                self.update_cards(card_set.group_id, cards)
+                if (i + 1) % 10 == 0:
+                    logger.info(f"Refreshed {i + 1}/{total_sets} sets")
+
+            logger.info("Cache refresh complete.")
+            return True
+
+        except Exception as e:
+            logger.error(f"Cache refresh failed: {e}")
+            raise
+
+        finally:
+            self._is_refreshing = False
+            self._refresh_lock.release()
+
+    def is_refreshing(self) -> bool:
+        """Check if a refresh is currently in progress."""
+        return self._is_refreshing
 
 # Global cache instance
 cache = PersistentCache()
