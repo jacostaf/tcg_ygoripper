@@ -14,6 +14,9 @@ import pickle
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, asdict
+from functools import lru_cache
+from urllib.parse import quote
+import re
 
 # Configuration
 TCGCSV_BASE_URL = "https://tcgcsv.com"
@@ -42,6 +45,44 @@ def fetch_ygoprodeck_sets() -> Dict[str, str]:
     except Exception as e:
         logger.error(f"Failed to fetch YGOProDeck sets: {e}")
         return {}
+
+
+@lru_cache(maxsize=5000)
+def fetch_ygoprodeck_image(card_name: str) -> str:
+    """
+    Fetch card image URL from YGOProDeck API as fallback for missing TCGcsv images.
+    Uses LRU cache to avoid repeated API calls for the same card.
+    """
+    try:
+        # Extract base card name (remove rarity/edition suffixes)
+        base_name = re.sub(r'\s*\([^)]*\)$', '', card_name)
+        base_name = re.sub(
+            r'\s*-\s*(Secret Rare|Ultra Rare|Super Rare|Rare|Common|Quarter Century Secret Rare|'
+            r'Starlight Rare|Ghost Rare|Collector\'s Rare|Prismatic Secret Rare|Ultimate Rare|'
+            r'Gold Rare|Platinum Rare|Silver Rare|ESR|QCR|UR|SR|CR).*$',
+            '', base_name, flags=re.IGNORECASE
+        )
+        base_name = base_name.strip()
+
+        if not base_name:
+            return ''
+
+        url = f"https://db.ygoprodeck.com/api/v7/cardinfo.php?name={quote(base_name)}"
+        resp = requests.get(url, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get('data') and len(data['data']) > 0:
+                card_images = data['data'][0].get('card_images', [])
+                if card_images:
+                    image_url = card_images[0].get('image_url', '')
+                    if image_url:
+                        logger.debug(f"Enriched missing image for '{card_name}' from YGOProDeck")
+                        return image_url
+    except Exception as e:
+        # Silently fail - this is a fallback, not critical
+        logger.debug(f"YGOProDeck image lookup failed for '{card_name}': {e}")
+    return ''
+
 
 @dataclass
 class CardSet:
@@ -365,10 +406,17 @@ def fetch_cards_for_set(group_id: int) -> List[Card]:
                 except ValueError:
                     return None
             
+            # Always use YGOProDeck for images - TCGPlayer CDN blocks hotlinking (403 Forbidden)
+            card_name = row['name']
+            image_url = fetch_ygoprodeck_image(card_name)
+            # Fallback to TCGcsv URL only if YGOProDeck fails (unlikely to work due to hotlinking block)
+            if not image_url:
+                image_url = row.get('imageUrl', '') or ''
+
             card = Card(
                 product_id=int(row['productId']),
-                name=row['name'],
-                image_url=row['imageUrl'],
+                name=card_name,
+                image_url=image_url,
                 group_id=int(row['groupId']),
                 ext_number=row.get('extNumber'),
                 ext_rarity=row.get('extRarity'),

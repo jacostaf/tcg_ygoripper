@@ -291,6 +291,16 @@ class SupabaseSync:
                 "tcgcsv_product_id": card.product_id
             })
 
+        # Deduplicate by card_slug to avoid "ON CONFLICT DO UPDATE cannot affect row a second time" error
+        seen_slugs = set()
+        deduped_data = []
+        for item in batch_data:
+            slug = item.get("card_slug")
+            if slug and slug not in seen_slugs:
+                seen_slugs.add(slug)
+                deduped_data.append(item)
+        batch_data = deduped_data
+
         # Insert in batches of 100
         results = {}
         batch_size = 100
@@ -334,6 +344,16 @@ class SupabaseSync:
                     "card_slug": data["slug"],
                     "tcgcsv_product_id": card.product_id
                 })
+
+        # Deduplicate by id to avoid "ON CONFLICT DO UPDATE cannot affect row a second time" error
+        seen_ids = set()
+        deduped_data = []
+        for item in batch_data:
+            item_id = item.get("id")
+            if item_id and item_id not in seen_ids:
+                seen_ids.add(item_id)
+                deduped_data.append(item)
+        batch_data = deduped_data
 
         results = {}
         batch_size = 100
