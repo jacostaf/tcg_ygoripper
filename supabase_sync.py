@@ -69,6 +69,8 @@ class SupabaseSync:
         self.rarity_map = {}
         self.set_map = {}
         self.variant_map = {}
+        # Map: tcgcsv_product_id -> ygoprodeck_id (for image fallback)
+        self.ygoprodeck_id_map = {}
         # Thread-safe lock for shared state
         self._state_lock = threading.Lock()
 
@@ -95,6 +97,57 @@ class SupabaseSync:
             if response is not None and response.text:
                 logger.error(f"Response: {response.text[:500]}")
             return None
+
+    def load_ygoprodeck_id_map(self):
+        """
+        Load mapping of tcgcsv_product_id -> ygoprodeck_id from Supabase.
+        This allows the API to include ygoprodeck_id for image fallback.
+        """
+        if not SUPABASE_SYNC_ENABLED:
+            logger.info("Supabase sync disabled, skipping ygoprodeck_id map load")
+            return
+
+        logger.info("Loading ygoprodeck_id mapping from Supabase...")
+        try:
+            # Fetch all variants with both IDs populated (paginated)
+            all_mappings = []
+            offset = 0
+            limit = 1000
+
+            while True:
+                result = self._request(
+                    "GET", "card_variants",
+                    params={
+                        "select": "tcgcsv_product_id,ygoprodeck_id",
+                        "tcgcsv_product_id": "not.is.null",
+                        "ygoprodeck_id": "not.is.null",
+                        "limit": str(limit),
+                        "offset": str(offset)
+                    }
+                )
+                if not result:
+                    break
+                all_mappings.extend(result)
+                if len(result) < limit:
+                    break
+                offset += limit
+
+            # Build the map
+            with self._state_lock:
+                self.ygoprodeck_id_map = {
+                    v["tcgcsv_product_id"]: v["ygoprodeck_id"]
+                    for v in all_mappings
+                    if v.get("tcgcsv_product_id") and v.get("ygoprodeck_id")
+                }
+
+            logger.info(f"Loaded {len(self.ygoprodeck_id_map)} ygoprodeck_id mappings")
+        except Exception as e:
+            logger.error(f"Failed to load ygoprodeck_id map: {e}")
+
+    def get_ygoprodeck_id(self, product_id: int) -> Optional[int]:
+        """Get ygoprodeck_id for a given tcgcsv_product_id."""
+        with self._state_lock:
+            return self.ygoprodeck_id_map.get(product_id)
 
     def sync_rarities(self):
         """Ensure all rarities exist in Supabase with intelligent defaults."""
@@ -591,21 +644,28 @@ class SupabaseSync:
                 })
 
         # Phase 6: Batch upsert prices
-        update_progress(message=f"Syncing {len(prices_batch)} prices...")
-        logger.info(f"Syncing {len(prices_batch)} prices in batches...")
+        total_prices = len(prices_batch)
+        update_progress(phase="prices", current=0, total=total_prices, message=f"Syncing {total_prices} prices...")
+        logger.info(f"Syncing {total_prices} prices in batches...")
 
         price_batch_size = 500  # Larger batch for prices
-        for i in range(0, len(prices_batch), price_batch_size):
+        for i in range(0, total_prices, price_batch_size):
             batch = prices_batch[i:i+price_batch_size]
             # Deduplicate by (card_variant_id, price_date, source)
             deduped = {(p["card_variant_id"], p["price_date"], p["source"]): p for p in batch}
             self._request("POST", "card_prices", data=list(deduped.values()),
                          params={"on_conflict": "card_variant_id,price_date,source"},
                          upsert=True)
-            if (i + price_batch_size) % 2000 == 0:
-                logger.info(f"Synced {min(i + price_batch_size, len(prices_batch))}/{len(prices_batch)} prices")
 
-        update_progress(current=total_cards, stats=stats, message="Variants sync complete")
+            # Update progress after each batch
+            synced_count = min(i + price_batch_size, total_prices)
+            update_progress(current=synced_count, total=total_prices,
+                          message=f"Syncing prices... {synced_count}/{total_prices}")
+
+            if synced_count % 2000 == 0:
+                logger.info(f"Synced {synced_count}/{total_prices} prices")
+
+        update_progress(current=total_prices, total=total_prices, stats=stats, message="Sync complete!")
         logger.info(f"Variants sync complete: {stats}")
 
     def run_sync(self):

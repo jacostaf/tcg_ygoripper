@@ -404,6 +404,8 @@ def get_set_cards(set_identifier: str):
         cards_data = []
         for card in cards:
             card_dict = card.to_dict()
+            # Get YGOProDeck ID for image fallback
+            ygoprodeck_id = syncer.get_ygoprodeck_id(card.product_id)
             # Map to expected frontend format
             card_dict.update({
                 'id': str(card.product_id),
@@ -422,7 +424,8 @@ def get_set_cards(set_identifier: str):
                 'market_price': card.market_price,
                 'low_price': card.low_price,
                 'mid_price': card.mid_price,
-                'high_price': card.high_price
+                'high_price': card.high_price,
+                'ygoprodeck_id': ygoprodeck_id  # For image fallback when TCGPlayer CDN fails
             })
             cards_data.append(card_dict)
         
@@ -1294,7 +1297,15 @@ if __name__ == '__main__':
                 logger.warning(f"⚠️ TCGcsv returned status {test_response.status_code}")
         except Exception as e:
             logger.warning(f"⚠️ TCGcsv connectivity test failed: {e}")
-        
+
+        # Load YGOProDeck ID mapping for image fallback
+        logger.info("Loading YGOProDeck ID mapping...")
+        try:
+            syncer.load_ygoprodeck_id_map()
+            logger.info("✅ YGOProDeck ID mapping loaded")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to load YGOProDeck ID mapping: {e}")
+
         app.run(
             host='0.0.0.0',
             port=server_port,
