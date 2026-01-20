@@ -983,6 +983,29 @@ def refresh_cache():
 from supabase_sync import syncer, get_progress
 from tcg_core import cache as tcg_cache
 
+# Catalog refresh progress tracking (similar to supabase_sync)
+_catalog_progress_lock = threading.Lock()
+catalog_refresh_progress = {
+    "status": "idle",  # idle, running, complete, error
+    "phase": "",
+    "current": 0,
+    "total": 0,
+    "message": "",
+    "started_at": None,
+    "completed_at": None
+}
+
+def update_catalog_progress(**kwargs):
+    """Thread-safe update of catalog refresh progress."""
+    global catalog_refresh_progress
+    with _catalog_progress_lock:
+        catalog_refresh_progress.update(kwargs)
+
+def get_catalog_progress():
+    """Thread-safe get of catalog refresh progress."""
+    with _catalog_progress_lock:
+        return dict(catalog_refresh_progress)
+
 @api_v1.route('/admin/refresh-catalog', methods=['POST'])
 @limiter.limit(RATE_LIMIT_ADMIN)
 @require_admin_auth
@@ -990,20 +1013,56 @@ def admin_refresh_catalog():
     """Refresh the card catalog from TCGcsv (fetches all sets and cards)."""
     try:
         def do_refresh():
-            logger.info("Starting TCGcsv catalog refresh...")
-            tcg_cache.refresh()
-            total_cards = sum(len(cards) for cards in tcg_cache.cards.values())
-            logger.info(f"Catalog refresh complete. Sets: {len(tcg_cache.card_sets)}, Cards: {total_cards}")
+            from datetime import datetime, timezone
+            try:
+                update_catalog_progress(
+                    status="running",
+                    phase="starting",
+                    current=0,
+                    total=0,
+                    message="Initializing catalog refresh...",
+                    started_at=datetime.now(timezone.utc).isoformat(),
+                    completed_at=None
+                )
+                logger.info("Starting TCGcsv catalog refresh...")
+
+                # Pass progress callback to get real-time updates during refresh
+                tcg_cache.refresh(progress_callback=update_catalog_progress)
+
+                total_cards = sum(len(cards) for cards in tcg_cache.cards.values())
+                update_catalog_progress(
+                    status="complete",
+                    phase="done",
+                    current=len(tcg_cache.card_sets),
+                    total=len(tcg_cache.card_sets),
+                    message=f"Refresh complete. {len(tcg_cache.card_sets)} sets, {total_cards} cards loaded.",
+                    completed_at=datetime.now(timezone.utc).isoformat()
+                )
+                logger.info(f"Catalog refresh complete. Sets: {len(tcg_cache.card_sets)}, Cards: {total_cards}")
+
+            except Exception as e:
+                update_catalog_progress(
+                    status="error",
+                    message=f"Refresh failed: {str(e)}"
+                )
+                logger.error(f"Catalog refresh failed: {e}")
 
         # Run in background (this can take several minutes)
         threading.Thread(target=do_refresh, daemon=True).start()
         return create_success_response({
             "current_sets": len(tcg_cache.card_sets),
             "current_cards": sum(len(cards) for cards in tcg_cache.cards.values())
-        }, "Catalog refresh started in background. This may take several minutes.")
+        }, "Catalog refresh started in background. Check progress via /admin/catalog-progress")
     except Exception as e:
         logger.error(f"Catalog refresh failed: {e}")
         return create_error_response(f"Failed to start catalog refresh: {str(e)}")
+
+@api_v1.route('/admin/catalog-progress', methods=['GET'])
+@limiter.limit("30 per minute")
+@require_admin_auth
+def admin_catalog_progress():
+    """Get catalog refresh progress."""
+    return create_success_response(get_catalog_progress())
 
 @api_v1.route('/admin/catalog-status', methods=['GET'])
 @limiter.limit(RATE_LIMIT_ADMIN)

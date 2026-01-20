@@ -132,6 +132,8 @@ class PersistentCache:
         # YGOProDeck fallback cache for set codes
         self.ygoprodeck_set_codes: Dict[str, str] = {}  # set_name_lower -> set_code
         self.ygoprodeck_last_updated: Optional[datetime] = None
+        # Persistent image URL cache - stores resolved image URLs to avoid repeated API calls
+        self.image_cache: Dict[str, str] = {}  # card_name -> image_url
         self.load_from_disk()
 
     def is_expired(self) -> bool:
@@ -152,7 +154,8 @@ class PersistentCache:
                     'product_id_index': self.product_id_index,
                     'last_updated': self.last_updated,
                     'ygoprodeck_set_codes': self.ygoprodeck_set_codes,
-                    'ygoprodeck_last_updated': self.ygoprodeck_last_updated
+                    'ygoprodeck_last_updated': self.ygoprodeck_last_updated,
+                    'image_cache': self.image_cache  # Persistent image URL cache
                 }
                 with open(CACHE_FILE, 'wb') as f:
                     pickle.dump(data, f)
@@ -179,6 +182,8 @@ class PersistentCache:
                     # Load YGOProDeck fallback cache
                     self.ygoprodeck_set_codes = data.get('ygoprodeck_set_codes', {})
                     self.ygoprodeck_last_updated = data.get('ygoprodeck_last_updated')
+                    # Load persistent image URL cache
+                    self.image_cache = data.get('image_cache', {})
                 # Rebuild product_id_index if missing (for existing caches)
                 if not self.product_id_index and self.cards:
                     for cards_list in self.cards.values():
@@ -197,6 +202,7 @@ class PersistentCache:
             self.last_updated = None
             self.ygoprodeck_set_codes = {}
             self.ygoprodeck_last_updated = None
+            self.image_cache = {}
 
     def get_sets(self) -> List[CardSet]:
         with self._lock:
@@ -222,7 +228,53 @@ class PersistentCache:
         with self._lock:
             return self.product_id_index.get(product_id)
 
-    def update_cards(self, group_id: int, cards: List[Card]):
+    def get_card_image(self, card_name: str, tcgcsv_image: str = '') -> str:
+        """
+        Get card image URL with intelligent fallback and persistent caching.
+
+        1. Return cached image if available (persistent across restarts)
+        2. Use TCGcsv/TCGPlayer image if provided
+        3. Fallback to YGOProDeck if missing/broken
+        4. Cache result for future use
+
+        Args:
+            card_name: Card name for cache lookup and YGOProDeck fallback
+            tcgcsv_image: Optional TCGcsv image URL to use if available
+
+        Returns:
+            Image URL or empty string if not found
+        """
+        with self._lock:
+            # Check persistent cache first
+            if card_name in self.image_cache and self.image_cache[card_name]:
+                return self.image_cache[card_name]
+
+        # Use TCGcsv image if available
+        if tcgcsv_image:
+            with self._lock:
+                self.image_cache[card_name] = tcgcsv_image
+            return tcgcsv_image
+
+        # Fallback to YGOProDeck (only called when actually needed, not during refresh)
+        ygoprodeck_url = fetch_ygoprodeck_image(card_name)
+        if ygoprodeck_url:
+            with self._lock:
+                self.image_cache[card_name] = ygoprodeck_url
+            logger.debug(f"Cached YGOProDeck image for '{card_name}'")
+            return ygoprodeck_url
+
+        return ''  # No image found
+
+    def update_cards(self, group_id: int, cards: List[Card], save: bool = True):
+        """
+        Update cards for a set.
+
+        Args:
+            group_id: The set's group ID
+            cards: List of cards to store
+            save: Whether to save to disk immediately (default True).
+                  Set to False during bulk refresh to batch saves.
+        """
         with self._lock:
             self.cards[group_id] = cards
             # Update global index and product_id index
@@ -238,7 +290,8 @@ class PersistentCache:
                 # Build product_id index for O(1) lookup
                 if card.product_id:
                     self.product_id_index[card.product_id] = card
-            self.save_to_disk()
+            if save:
+                self.save_to_disk()
 
     def search_global_index(self, query: str, limit: int = 100) -> List[Card]:
         """
@@ -309,13 +362,15 @@ class PersistentCache:
                 except Exception as e:
                     logger.error(f"Failed to delete cache file: {e}")
 
-    def refresh(self, force: bool = False) -> bool:
+    def refresh(self, force: bool = False, progress_callback=None) -> bool:
         """
         Force refresh the entire cache.
 
         Args:
             force: If True, block and wait even if another refresh is in progress.
                    If False (default), return immediately if refresh is in progress.
+            progress_callback: Optional callable that receives progress updates.
+                               Called with kwargs: current, total, message, phase
 
         Returns:
             True if refresh completed, False if skipped due to concurrent refresh.
@@ -327,26 +382,51 @@ class PersistentCache:
             logger.info("Refresh already in progress, skipping")
             return False
 
+        def report_progress(**kwargs):
+            """Helper to report progress if callback provided."""
+            if progress_callback:
+                try:
+                    progress_callback(**kwargs)
+                except Exception as e:
+                    logger.warning(f"Progress callback error: {e}")
+
         try:
             self._is_refreshing = True
             logger.info("Refreshing cache...")
+            report_progress(phase="init", message="Clearing old cache data...")
             self.clear()
 
             # Fetch sets
+            report_progress(phase="sets", message="Fetching card sets from TCGcsv...")
             sets = fetch_card_sets()
             self.update_sets(sets)
 
-            # Fetch cards for all sets
+            # Fetch cards for all sets (batch saves - save once at end)
             total_sets = len(sets)
             logger.info(f"Found {total_sets} sets. Fetching cards...")
+            report_progress(phase="cards", current=0, total=total_sets,
+                          message=f"Found {total_sets} sets. Starting card fetch...")
 
             for i, card_set in enumerate(sets):
                 cards = fetch_cards_for_set(card_set.group_id)
-                self.update_cards(card_set.group_id, cards)
+                self.update_cards(card_set.group_id, cards, save=False)  # Don't save per-set
+
+                # Report progress for every set
+                report_progress(
+                    phase="cards",
+                    current=i + 1,
+                    total=total_sets,
+                    message=f"[{i + 1}/{total_sets}] {card_set.name} ({len(cards)} cards)"
+                )
+
                 if (i + 1) % 10 == 0:
                     logger.info(f"Refreshed {i + 1}/{total_sets} sets")
 
-            logger.info("Cache refresh complete.")
+            # Save once at end (much faster than 646+ individual saves)
+            report_progress(phase="saving", message="Saving cache to disk...")
+            self.save_to_disk()
+            total_cards = sum(len(c) for c in self.cards.values())
+            logger.info(f"Cache refresh complete. {total_cards} cards loaded.")
             return True
 
         except Exception as e:
@@ -439,12 +519,10 @@ def fetch_cards_for_set(group_id: int) -> List[Card]:
                 except ValueError:
                     return None
             
-            # Always use YGOProDeck for images - TCGPlayer CDN blocks hotlinking (403 Forbidden)
+            # Use TCGcsv image directly during refresh - no slow API calls
+            # YGOProDeck fallback is handled on-demand via cache.get_card_image()
             card_name = row['name']
-            image_url = fetch_ygoprodeck_image(card_name)
-            # Fallback to TCGcsv URL only if YGOProDeck fails (unlikely to work due to hotlinking block)
-            if not image_url:
-                image_url = row.get('imageUrl', '') or ''
+            image_url = row.get('imageUrl', '') or ''
 
             card = Card(
                 product_id=int(row['productId']),
