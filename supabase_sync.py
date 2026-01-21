@@ -150,8 +150,8 @@ class SupabaseSync:
             return self.ygoprodeck_id_map.get(product_id)
 
     def _load_ygoprodeck_name_cache(self):
-        """Load or refresh the YGOProDeck name -> id cache from API."""
-        logger.info("Loading YGOProDeck name cache from API...")
+        """Load YGOProDeck name -> id AND set_code -> id caches from single API call."""
+        logger.info("Loading YGOProDeck caches from API...")
         try:
             resp = requests.get(
                 "https://db.ygoprodeck.com/api/v7/cardinfo.php",
@@ -160,16 +160,29 @@ class SupabaseSync:
             resp.raise_for_status()
 
             self.ygoprodeck_name_cache = {}
+            self.ygoprodeck_setcode_cache = {}  # Also build set_code -> id mapping
+
             for card in resp.json().get("data", []):
                 name = card.get("name", "").strip().lower()
                 konami_id = card.get("id")
+
                 if name and konami_id:
                     self.ygoprodeck_name_cache[name] = konami_id
 
-            logger.info(f"Loaded {len(self.ygoprodeck_name_cache)} YGOProDeck name mappings")
+                # Build set_code -> id mapping for fallback matching
+                card_sets = card.get("card_sets", [])
+                if konami_id and card_sets:
+                    for card_set in card_sets:
+                        set_code = card_set.get("set_code", "").strip()
+                        if set_code and set_code not in self.ygoprodeck_setcode_cache:
+                            self.ygoprodeck_setcode_cache[set_code] = konami_id
+
+            logger.info(f"Loaded {len(self.ygoprodeck_name_cache)} name mappings, "
+                        f"{len(self.ygoprodeck_setcode_cache)} set_code mappings")
         except Exception as e:
-            logger.error(f"Failed to load YGOProDeck name cache: {e}")
+            logger.error(f"Failed to load YGOProDeck caches: {e}")
             self.ygoprodeck_name_cache = {}
+            self.ygoprodeck_setcode_cache = {}
 
     def sync_ygoprodeck_ids_incremental(self, max_cards: int = 100):
         """
@@ -188,10 +201,10 @@ class SupabaseSync:
             logger.warning("YGOProDeck name cache is empty, skipping incremental sync")
             return
 
-        # Query for cards missing ygoprodeck_id (limited)
+        # Query for cards missing ygoprodeck_id (includes card_number for set_code matching)
         update_progress(phase="ygoprodeck_ids", message="Checking for missing YGOProDeck IDs...")
         missing = self._request("GET", "card_variants", params={
-            "select": "id,card_name",
+            "select": "id,card_name,card_number",
             "ygoprodeck_id": "is.null",
             "limit": str(max_cards)
         })
@@ -202,15 +215,25 @@ class SupabaseSync:
 
         logger.info(f"Found {len(missing)} cards missing ygoprodeck_id")
 
-        # Match with cache
+        # Get set_code cache (built alongside name cache)
+        setcode_cache = getattr(self, 'ygoprodeck_setcode_cache', {})
+
+        # Match with cache (name first, then set_code fallback)
         updates = []
         unknown_names = set()
         for variant in missing:
             card_name = variant.get("card_name", "").strip()
+            card_number = variant.get("card_number", "").strip()
             if not card_name:
                 continue
 
+            # Try name match first (fast path for most cards)
             konami_id = self.ygoprodeck_name_cache.get(card_name.lower())
+
+            # If no name match, try set_code match (handles mismatched names like "Maliss C GWC-06")
+            if not konami_id and card_number and setcode_cache:
+                konami_id = setcode_cache.get(card_number)
+
             if konami_id:
                 updates.append({"id": variant["id"], "ygoprodeck_id": konami_id})
             else:
