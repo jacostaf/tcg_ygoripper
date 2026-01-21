@@ -149,6 +149,86 @@ class SupabaseSync:
         with self._state_lock:
             return self.ygoprodeck_id_map.get(product_id)
 
+    def _load_ygoprodeck_name_cache(self):
+        """Load or refresh the YGOProDeck name -> id cache from API."""
+        logger.info("Loading YGOProDeck name cache from API...")
+        try:
+            resp = requests.get(
+                "https://db.ygoprodeck.com/api/v7/cardinfo.php",
+                timeout=120
+            )
+            resp.raise_for_status()
+
+            self.ygoprodeck_name_cache = {}
+            for card in resp.json().get("data", []):
+                name = card.get("name", "").strip().lower()
+                konami_id = card.get("id")
+                if name and konami_id:
+                    self.ygoprodeck_name_cache[name] = konami_id
+
+            logger.info(f"Loaded {len(self.ygoprodeck_name_cache)} YGOProDeck name mappings")
+        except Exception as e:
+            logger.error(f"Failed to load YGOProDeck name cache: {e}")
+            self.ygoprodeck_name_cache = {}
+
+    def sync_ygoprodeck_ids_incremental(self, max_cards: int = 100):
+        """
+        Sync ygoprodeck_id for cards that don't have one yet.
+        Called during regular sync to handle new cards.
+        Limited to max_cards per sync run to avoid slowing down sync.
+        """
+        if not SUPABASE_SYNC_ENABLED:
+            return
+
+        # Check if we have the name->id cache loaded
+        if not hasattr(self, 'ygoprodeck_name_cache') or not self.ygoprodeck_name_cache:
+            self._load_ygoprodeck_name_cache()
+
+        if not self.ygoprodeck_name_cache:
+            logger.warning("YGOProDeck name cache is empty, skipping incremental sync")
+            return
+
+        # Query for cards missing ygoprodeck_id (limited)
+        update_progress(phase="ygoprodeck_ids", message="Checking for missing YGOProDeck IDs...")
+        missing = self._request("GET", "card_variants", params={
+            "select": "id,card_name",
+            "ygoprodeck_id": "is.null",
+            "limit": str(max_cards)
+        })
+
+        if not missing:
+            logger.info("No cards missing ygoprodeck_id")
+            return
+
+        logger.info(f"Found {len(missing)} cards missing ygoprodeck_id")
+
+        # Match with cache
+        updates = []
+        unknown_names = set()
+        for variant in missing:
+            card_name = variant.get("card_name", "").strip()
+            if not card_name:
+                continue
+
+            konami_id = self.ygoprodeck_name_cache.get(card_name.lower())
+            if konami_id:
+                updates.append({"id": variant["id"], "ygoprodeck_id": konami_id})
+            else:
+                unknown_names.add(card_name)
+
+        # Batch update database
+        if updates:
+            update_progress(message=f"Updating {len(updates)} cards with YGOProDeck IDs...")
+            for update in updates:
+                self._request("PATCH", "card_variants",
+                    data={"ygoprodeck_id": update["ygoprodeck_id"]},
+                    params={"id": f"eq.{update['id']}"})
+
+        logger.info(f"Updated {len(updates)} cards with ygoprodeck_id, {len(unknown_names)} not found in YGOProDeck")
+
+        # Also update our in-memory map for immediate use
+        self.load_ygoprodeck_id_map()
+
     def sync_rarities(self):
         """Ensure all rarities exist in Supabase with intelligent defaults."""
         update_progress(phase="rarities", message="Syncing rarities...")
@@ -690,6 +770,10 @@ class SupabaseSync:
             self.sync_rarities()
             self.sync_sets()
             self.sync_variants_and_prices()
+
+            # Sync YGOProDeck IDs for new cards (incremental)
+            update_progress(phase="ygoprodeck_ids", message="Syncing YGOProDeck IDs for new cards...")
+            self.sync_ygoprodeck_ids_incremental(max_cards=100)
 
             # Trigger leaderboard refresh
             update_progress(phase="leaderboards", message="Refreshing leaderboards...")
