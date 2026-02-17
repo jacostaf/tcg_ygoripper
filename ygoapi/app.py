@@ -9,6 +9,7 @@ import logging
 import os
 
 from flask import Flask
+from flask_compress import Compress
 from flask_cors import CORS
 
 from .config import (
@@ -36,6 +37,10 @@ def create_app() -> Flask:
 
     # Create Flask app
     app = Flask(__name__)
+
+    # Enable response compression (gzip/brotli)
+    app.config['COMPRESS_MIN_SIZE'] = 500
+    Compress(app)
 
     # Enable CORS for all routes
     # CORS(
