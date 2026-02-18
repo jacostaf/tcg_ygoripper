@@ -85,7 +85,7 @@ def require_admin_auth(f):
     """
     Decorator that validates Supabase JWT and checks if user is an admin.
     Requires valid Authorization: Bearer <token> header.
-    User must have is_admin=true in their user_profiles table.
+    User must have is_admin=true in their profiles table.
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -109,7 +109,7 @@ def require_admin_auth(f):
             # Validate JWT by calling Supabase to get user's profile
             # The JWT token is used to authenticate, and RLS ensures we only get our own profile
             response = requests.get(
-                f"{SUPABASE_URL}/rest/v1/user_profiles?select=is_admin",
+                f"{SUPABASE_URL}/rest/v1/profiles?select=is_admin",
                 headers={
                     "Authorization": f"Bearer {token}",
                     "apikey": api_key,
