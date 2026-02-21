@@ -39,18 +39,8 @@ app = Flask(__name__)
 # Create API v1 Blueprint
 api_v1 = Blueprint('api_v1', __name__, url_prefix='/api/v1')
 
-# Secure CORS configuration with specific allowed origins
-allowed_origins = [
-    "http://localhost:7001",
-    "http://127.0.0.1:7001",
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:8080",
-    "http://127.0.0.1:8080",
-    "http://localhost:3001",
-    "http://127.0.0.1:3001",
-    "https://ygopwa.onrender.com"
-]
+# CORS origins from configuration (no more hardcoded list)
+allowed_origins = get_cors_origins()
 CORS(app,
      origins=allowed_origins,
      supports_credentials=True,
@@ -85,7 +75,7 @@ def require_admin_auth(f):
     """
     Decorator that validates Supabase JWT and checks if user is an admin.
     Requires valid Authorization: Bearer <token> header.
-    User must have is_admin=true in their user_profiles table.
+    User must have is_admin=true in their profiles table.
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -109,7 +99,7 @@ def require_admin_auth(f):
             # Validate JWT by calling Supabase to get user's profile
             # The JWT token is used to authenticate, and RLS ensures we only get our own profile
             response = requests.get(
-                f"{SUPABASE_URL}/rest/v1/user_profiles?select=is_admin",
+                f"{SUPABASE_URL}/rest/v1/profiles?select=is_admin",
                 headers={
                     "Authorization": f"Bearer {token}",
                     "apikey": api_key,

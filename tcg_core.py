@@ -14,7 +14,7 @@ import pickle
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, asdict
-from functools import lru_cache
+from functools import lru_cache, wraps
 from urllib.parse import quote
 import re
 
@@ -47,11 +47,52 @@ def fetch_ygoprodeck_sets() -> Dict[str, str]:
         return {}
 
 
-@lru_cache(maxsize=5000)
+def _ttl_cache(maxsize=5000, ttl_seconds=86400):
+    """LRU cache with TTL expiration. Entries older than ttl_seconds are evicted."""
+    def decorator(fn):
+        _cache = {}
+        _order = []  # oldest first for eviction
+
+        @wraps(fn)
+        def wrapper(*args):
+            import time
+            now = time.monotonic()
+            key = args
+            # Check cache hit
+            if key in _cache:
+                value, ts = _cache[key]
+                if now - ts < ttl_seconds:
+                    return value
+                # Expired - remove
+                del _cache[key]
+                try:
+                    _order.remove(key)
+                except ValueError:
+                    pass
+
+            # Call function
+            result = fn(*args)
+
+            # Evict if at capacity
+            while len(_cache) >= maxsize and _order:
+                oldest = _order.pop(0)
+                _cache.pop(oldest, None)
+
+            _cache[key] = (result, now)
+            _order.append(key)
+            return result
+
+        wrapper.cache_clear = lambda: (_cache.clear(), _order.clear())
+        wrapper.cache_info = lambda: {'size': len(_cache), 'maxsize': maxsize, 'ttl': ttl_seconds}
+        return wrapper
+    return decorator
+
+
+@_ttl_cache(maxsize=5000, ttl_seconds=86400)
 def fetch_ygoprodeck_image(card_name: str) -> str:
     """
     Fetch card image URL from YGOProDeck API as fallback for missing TCGcsv images.
-    Uses LRU cache to avoid repeated API calls for the same card.
+    Uses TTL cache (24h) to avoid repeated API calls for the same card.
     """
     try:
         # Extract base card name (remove rarity/edition suffixes)
