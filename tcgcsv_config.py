@@ -28,8 +28,8 @@ elif os.path.exists('.env'):
 # =============================================================================
 
 # Server Configuration
-PORT = int(os.getenv("PORT", 8081))
-DEBUG = os.getenv("DEBUG", "true").lower() == "true"
+PORT = int(os.getenv("PORT", 8080))
+DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 

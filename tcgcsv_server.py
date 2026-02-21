@@ -39,18 +39,8 @@ app = Flask(__name__)
 # Create API v1 Blueprint
 api_v1 = Blueprint('api_v1', __name__, url_prefix='/api/v1')
 
-# Secure CORS configuration with specific allowed origins
-allowed_origins = [
-    "http://localhost:7001",
-    "http://127.0.0.1:7001",
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:8080",
-    "http://127.0.0.1:8080",
-    "http://localhost:3001",
-    "http://127.0.0.1:3001",
-    "https://ygopwa.onrender.com"
-]
+# CORS origins from configuration (no more hardcoded list)
+allowed_origins = get_cors_origins()
 CORS(app,
      origins=allowed_origins,
      supports_credentials=True,
